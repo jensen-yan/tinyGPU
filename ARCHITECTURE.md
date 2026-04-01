@@ -57,6 +57,7 @@
 ## 初始指令集
 
 - `mov_imm`
+- `mov_thread_idx`
 - `add`
 - `mul`
 - `load_global`

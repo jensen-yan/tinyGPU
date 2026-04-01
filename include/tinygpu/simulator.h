@@ -13,13 +13,16 @@ struct Config {
     std::size_t block_count = 2;
     std::size_t register_count = 8;
     std::size_t shared_memory_bytes = 1024;
-    std::size_t global_memory_bytes = 4096;
+    std::size_t global_memory_words = 1024;
     std::size_t max_cycles = 256;
 };
 
 enum class OpCode {
     MovImm,
+    MovThreadIdx,
     Add,
+    LoadGlobal,
+    StoreGlobal,
     Exit,
 };
 
@@ -39,6 +42,8 @@ struct Kernel {
 struct Stats {
     std::size_t cycles = 0;
     std::size_t warp_issue_count = 0;
+    std::size_t global_load_count = 0;
+    std::size_t global_store_count = 0;
     std::size_t completed_warps = 0;
 };
 
@@ -47,6 +52,9 @@ public:
     explicit Simulator(Config config);
 
     Stats run(const Kernel& kernel);
+    void write_global(std::size_t index, std::int32_t value);
+    std::int32_t read_global(std::size_t index) const;
+    std::size_t global_memory_size() const;
 
 private:
     struct ThreadState {
@@ -71,12 +79,14 @@ private:
     };
 
     Config config_;
-    std::vector<std::uint8_t> global_memory_;
+    std::vector<std::int32_t> global_memory_;
+    Stats current_stats_;
 
     std::vector<BlockState> build_blocks(const Kernel& kernel) const;
     bool step_warp(const Kernel& kernel, WarpState& warp);
 };
 
 Kernel make_bootstrap_kernel();
+Kernel make_vector_add_kernel(std::int32_t a_base, std::int32_t b_base, std::int32_t c_base);
 
 }  // namespace tinygpu
