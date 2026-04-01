@@ -19,7 +19,7 @@
   - `vector_add`
   - `branch_demo`
   - `shared_exchange`
-  - `block_reduction` 原型
+  - `block_reduction`
 
 ## 指令子集
 
@@ -27,9 +27,11 @@
 
 - `mov_imm`
 - `mov_thread_idx`
+- `mov_block_idx`
 - `mov_block_thread_idx`
 - `add`
 - `and_imm`
+- `set_lt_imm`
 - `xor_imm`
 - `load_global`
 - `store_global`

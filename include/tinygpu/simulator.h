@@ -14,15 +14,17 @@ struct Config {
     std::size_t register_count = 8;
     std::size_t shared_memory_words = 256;
     std::size_t global_memory_words = 1024;
-    std::size_t max_cycles = 256;
+    std::size_t max_cycles = 1024;
 };
 
 enum class OpCode {
     MovImm,
     MovThreadIdx,
+    MovBlockIdx,
     MovBlockThreadIdx,
     Add,
     AndImm,
+    SetLtImm,
     XorImm,
     LoadGlobal,
     StoreGlobal,
@@ -40,6 +42,7 @@ struct Instruction {
     std::uint32_t src1 = 0;
     std::int32_t imm = 0;
     std::uint32_t target = 0;
+    std::uint32_t join_target = 0;
 };
 
 struct Kernel {
@@ -76,9 +79,12 @@ private:
     };
 
     struct WarpState {
-        struct ExecContext {
-            std::size_t pc = 0;
-            std::vector<bool> active_mask;
+        struct ReconvergenceFrame {
+            std::size_t merge_pc = 0;
+            std::size_t pending_pc = 0;
+            bool pending_started = false;
+            std::vector<bool> pending_mask;
+            std::vector<bool> union_mask;
         };
 
         std::size_t warp_index = 0;
@@ -89,7 +95,7 @@ private:
         std::size_t barrier_generation = 0;
         std::vector<bool> active_mask;
         std::vector<ThreadState> threads;
-        std::vector<ExecContext> pending_paths;
+        std::vector<ReconvergenceFrame> reconvergence_stack;
     };
 
     struct BlockState {
@@ -106,7 +112,7 @@ private:
     std::vector<BlockState> build_blocks(const Kernel& kernel) const;
     bool has_live_threads(const WarpState& warp, const std::vector<bool>& mask) const;
     bool all_threads_done(const WarpState& warp) const;
-    void restore_next_path(WarpState& warp);
+    void advance_reconvergence(WarpState& warp);
     bool step_warp(const Kernel& kernel, BlockState& block, WarpState& warp);
 };
 

@@ -127,4 +127,34 @@ TEST(SimulatorTest, SharedExchangeUsesBarrierAndBlockSharedMemory) {
     EXPECT_EQ(stats.completed_warps, 4u);
 }
 
+TEST(SimulatorTest, BlockReductionProducesOneSumPerBlock) {
+    const tinygpu::Config config = default_config();
+    tinygpu::Simulator simulator(config);
+
+    const std::size_t thread_count = total_threads(config);
+    const std::size_t in_base = 5 * thread_count;
+    const std::size_t out_base = in_base + thread_count;
+    ASSERT_GE(simulator.global_memory_size(), out_base + config.block_count);
+
+    for (std::size_t i = 0; i < thread_count; ++i) {
+        simulator.write_global(in_base + i, 1);
+    }
+    for (std::size_t block = 0; block < config.block_count; ++block) {
+        simulator.write_global(out_base + block, -1);
+    }
+
+    const tinygpu::Kernel kernel = tinygpu::make_block_reduction_kernel(
+        static_cast<std::int32_t>(in_base),
+        static_cast<std::int32_t>(out_base));
+    const tinygpu::Stats stats = simulator.run(kernel);
+
+    for (std::size_t block = 0; block < config.block_count; ++block) {
+        EXPECT_EQ(simulator.read_global(out_base + block), static_cast<std::int32_t>(config.threads_per_block))
+            << "block " << block;
+    }
+    EXPECT_EQ(stats.global_store_count, config.block_count);
+    EXPECT_EQ(stats.barrier_issue_count, 28u);
+    EXPECT_EQ(stats.completed_warps, 4u);
+}
+
 }  // namespace

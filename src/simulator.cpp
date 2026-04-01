@@ -19,15 +19,27 @@ bool Simulator::all_threads_done(const WarpState& warp) const {
     });
 }
 
-void Simulator::restore_next_path(WarpState& warp) {
-    while (!warp.pending_paths.empty()) {
-        WarpState::ExecContext ctx = std::move(warp.pending_paths.back());
-        warp.pending_paths.pop_back();
-        if (has_live_threads(warp, ctx.active_mask)) {
-            warp.pc = ctx.pc;
-            warp.active_mask = std::move(ctx.active_mask);
+void Simulator::advance_reconvergence(WarpState& warp) {
+    while (!warp.reconvergence_stack.empty()) {
+        WarpState::ReconvergenceFrame& frame = warp.reconvergence_stack.back();
+        const bool path_complete = !has_live_threads(warp, warp.active_mask) || warp.pc == frame.merge_pc;
+        if (!path_complete) {
             return;
         }
+
+        if (!frame.pending_started) {
+            frame.pending_started = true;
+            warp.pc = frame.pending_pc;
+            warp.active_mask = frame.pending_mask;
+            if (has_live_threads(warp, warp.active_mask)) {
+                return;
+            }
+            continue;
+        }
+
+        warp.pc = frame.merge_pc;
+        warp.active_mask = frame.union_mask;
+        warp.reconvergence_stack.pop_back();
     }
 }
 
@@ -99,12 +111,10 @@ bool Simulator::step_warp(const Kernel& kernel, BlockState& block, WarpState& wa
         return false;
     }
 
+    advance_reconvergence(warp);
     if (!has_live_threads(warp, warp.active_mask)) {
-        restore_next_path(warp);
-        if (!has_live_threads(warp, warp.active_mask)) {
-            warp.done = all_threads_done(warp);
-            return false;
-        }
+        warp.done = all_threads_done(warp);
+        return false;
     }
 
     if (warp.pc >= kernel.instructions.size()) {
@@ -135,6 +145,15 @@ bool Simulator::step_warp(const Kernel& kernel, BlockState& block, WarpState& wa
         }
         ++warp.pc;
         break;
+    case OpCode::MovBlockIdx:
+        for (std::size_t lane = 0; lane < warp.threads.size(); ++lane) {
+            if (!warp.active_mask[lane] || warp.threads[lane].done) {
+                continue;
+            }
+            warp.threads[lane].registers.at(inst.dst) = static_cast<std::int32_t>(warp.block_index);
+        }
+        ++warp.pc;
+        break;
     case OpCode::MovBlockThreadIdx:
         for (std::size_t lane = 0; lane < warp.threads.size(); ++lane) {
             if (!warp.active_mask[lane] || warp.threads[lane].done) {
@@ -162,6 +181,16 @@ bool Simulator::step_warp(const Kernel& kernel, BlockState& block, WarpState& wa
             }
             warp.threads[lane].registers.at(inst.dst) =
                 warp.threads[lane].registers.at(inst.src0) & inst.imm;
+        }
+        ++warp.pc;
+        break;
+    case OpCode::SetLtImm:
+        for (std::size_t lane = 0; lane < warp.threads.size(); ++lane) {
+            if (!warp.active_mask[lane] || warp.threads[lane].done) {
+                continue;
+            }
+            warp.threads[lane].registers.at(inst.dst) =
+                (warp.threads[lane].registers.at(inst.src0) < inst.imm) ? 1 : 0;
         }
         ++warp.pc;
         break;
@@ -238,7 +267,12 @@ bool Simulator::step_warp(const Kernel& kernel, BlockState& block, WarpState& wa
         const bool any_fallthrough = has_live_threads(warp, fallthrough_mask);
 
         if (any_taken && any_fallthrough) {
-            warp.pending_paths.push_back(WarpState::ExecContext{warp.pc + 1, fallthrough_mask});
+            std::vector<bool> union_mask = taken_mask;
+            for (std::size_t lane = 0; lane < union_mask.size(); ++lane) {
+                union_mask[lane] = union_mask[lane] || fallthrough_mask[lane];
+            }
+            warp.reconvergence_stack.push_back(
+                WarpState::ReconvergenceFrame{inst.join_target, warp.pc + 1, false, fallthrough_mask, union_mask});
             warp.active_mask = std::move(taken_mask);
             warp.pc = inst.target;
             ++current_stats_.divergent_branch_count;
@@ -290,10 +324,7 @@ bool Simulator::step_warp(const Kernel& kernel, BlockState& block, WarpState& wa
         break;
     }
 
-    if (!has_live_threads(warp, warp.active_mask)) {
-        restore_next_path(warp);
-    }
-
+    advance_reconvergence(warp);
     warp.done = all_threads_done(warp);
     return issued;
 }
