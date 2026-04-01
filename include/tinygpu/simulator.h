@@ -23,6 +23,7 @@ enum class OpCode {
     MovBlockIdx,
     MovBlockThreadIdx,
     Add,
+    Mul,
     AndImm,
     SetLtImm,
     XorImm,

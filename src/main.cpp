@@ -191,6 +191,76 @@ bool run_block_reduction_demo(tinygpu::Simulator& simulator, const tinygpu::Conf
     return ok;
 }
 
+bool run_tiled_matmul_demo() {
+    tinygpu::Config config;
+    config.block_count = 1;
+    config.register_count = 10;
+
+    tinygpu::Simulator simulator(config);
+    constexpr std::size_t kDim = 8;
+    constexpr std::size_t kMatrixSize = kDim * kDim;
+    const std::size_t a_base = 0;
+    const std::size_t b_base = a_base + kMatrixSize;
+    const std::size_t c_base = b_base + kMatrixSize;
+
+    if (c_base + kMatrixSize > simulator.global_memory_size()) {
+        std::cerr << "fatal: global memory is too small for tiled matmul demo\n";
+        return false;
+    }
+
+    for (std::size_t row = 0; row < kDim; ++row) {
+        for (std::size_t col = 0; col < kDim; ++col) {
+            const std::size_t index = row * kDim + col;
+            simulator.write_global(a_base + index, static_cast<std::int32_t>(row * 10 + col + 1));
+            simulator.write_global(b_base + index, static_cast<std::int32_t>((row == col) ? 2 : 1));
+            simulator.write_global(c_base + index, -1);
+        }
+    }
+
+    const tinygpu::Kernel kernel = tinygpu::make_tiled_matmul_kernel(
+        static_cast<std::int32_t>(a_base),
+        static_cast<std::int32_t>(b_base),
+        static_cast<std::int32_t>(c_base));
+    const tinygpu::Stats stats = simulator.run(kernel);
+
+    bool ok = true;
+    for (std::size_t row = 0; row < kDim; ++row) {
+        for (std::size_t col = 0; col < kDim; ++col) {
+            std::int32_t expected = 0;
+            for (std::size_t k = 0; k < kDim; ++k) {
+                const std::int32_t a = static_cast<std::int32_t>(row * 10 + k + 1);
+                const std::int32_t b = static_cast<std::int32_t>((k == col) ? 2 : 1);
+                expected += a * b;
+            }
+            if (simulator.read_global(c_base + row * kDim + col) != expected) {
+                ok = false;
+                break;
+            }
+        }
+        if (!ok) {
+            break;
+        }
+    }
+
+    std::cout << "tinyGPU tiled matmul demo\n";
+    std::cout << "kernel: " << kernel.name << "\n";
+    std::cout << "threads: " << kMatrixSize << "\n";
+    std::cout << "cycles: " << stats.cycles << "\n";
+    std::cout << "warp_issues: " << stats.warp_issue_count << "\n";
+    std::cout << "global_loads: " << stats.global_load_count << "\n";
+    std::cout << "global_stores: " << stats.global_store_count << "\n";
+    std::cout << "shared_loads: " << stats.shared_load_count << "\n";
+    std::cout << "shared_stores: " << stats.shared_store_count << "\n";
+    std::cout << "barriers: " << stats.barrier_issue_count << "\n";
+    std::cout << "divergent_branches: " << stats.divergent_branch_count << "\n";
+    std::cout << "completed_warps: " << stats.completed_warps << "\n";
+    std::cout << "sample C[0]: " << simulator.read_global(c_base) << "\n";
+    std::cout << "sample C[7]: " << simulator.read_global(c_base + 7) << "\n";
+    std::cout << "sample C[last]: " << simulator.read_global(c_base + kMatrixSize - 1) << "\n";
+    std::cout << "status: " << (ok ? "PASS" : "FAIL") << "\n";
+    return ok;
+}
+
 }  // namespace
 
 int main() {
@@ -203,7 +273,9 @@ int main() {
         const bool shared_ok = run_shared_exchange_demo(simulator, config);
         std::cout << "\n";
         const bool reduction_ok = run_block_reduction_demo(simulator, config);
-        return (vector_ok && branch_ok && shared_ok && reduction_ok) ? 0 : 1;
+        std::cout << "\n";
+        const bool matmul_ok = run_tiled_matmul_demo();
+        return (vector_ok && branch_ok && shared_ok && reduction_ok && matmul_ok) ? 0 : 1;
     } catch (const std::exception& ex) {
         std::cerr << "fatal: " << ex.what() << "\n";
         return 1;

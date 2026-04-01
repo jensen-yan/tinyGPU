@@ -181,6 +181,16 @@ bool Simulator::step_warp(const Kernel& kernel, BlockState& block, WarpState& wa
         }
         ++warp.pc;
         break;
+    case OpCode::Mul:
+        for (std::size_t lane = 0; lane < warp.threads.size(); ++lane) {
+            if (!warp.active_mask[lane] || warp.threads[lane].done) {
+                continue;
+            }
+            warp.threads[lane].registers.at(inst.dst) =
+                warp.threads[lane].registers.at(inst.src0) * warp.threads[lane].registers.at(inst.src1);
+        }
+        ++warp.pc;
+        break;
     case OpCode::AndImm:
         for (std::size_t lane = 0; lane < warp.threads.size(); ++lane) {
             if (!warp.active_mask[lane] || warp.threads[lane].done) {

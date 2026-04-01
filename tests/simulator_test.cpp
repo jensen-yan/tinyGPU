@@ -157,4 +157,51 @@ TEST(SimulatorTest, BlockReductionProducesOneSumPerBlock) {
     EXPECT_EQ(stats.completed_warps, 4u);
 }
 
+TEST(SimulatorTest, TiledMatmulProducesExpected8x8Tile) {
+    tinygpu::Config config = default_config();
+    config.block_count = 1;
+    config.register_count = 10;
+    tinygpu::Simulator simulator(config);
+
+    constexpr std::size_t kDim = 8;
+    constexpr std::size_t kMatrixSize = kDim * kDim;
+    const std::size_t a_base = 0;
+    const std::size_t b_base = a_base + kMatrixSize;
+    const std::size_t c_base = b_base + kMatrixSize;
+    ASSERT_GE(simulator.global_memory_size(), c_base + kMatrixSize);
+
+    for (std::size_t row = 0; row < kDim; ++row) {
+        for (std::size_t col = 0; col < kDim; ++col) {
+            const std::size_t index = row * kDim + col;
+            simulator.write_global(a_base + index, static_cast<std::int32_t>(row * 10 + col + 1));
+            simulator.write_global(b_base + index, static_cast<std::int32_t>((row == col) ? 2 : 1));
+            simulator.write_global(c_base + index, -1);
+        }
+    }
+
+    const tinygpu::Kernel kernel = tinygpu::make_tiled_matmul_kernel(
+        static_cast<std::int32_t>(a_base),
+        static_cast<std::int32_t>(b_base),
+        static_cast<std::int32_t>(c_base));
+    const tinygpu::Stats stats = simulator.run(kernel);
+
+    for (std::size_t row = 0; row < kDim; ++row) {
+        for (std::size_t col = 0; col < kDim; ++col) {
+            std::int32_t expected = 0;
+            for (std::size_t k = 0; k < kDim; ++k) {
+                const std::int32_t a = static_cast<std::int32_t>(row * 10 + k + 1);
+                const std::int32_t b = static_cast<std::int32_t>((k == col) ? 2 : 1);
+                expected += a * b;
+            }
+            EXPECT_EQ(simulator.read_global(c_base + row * kDim + col), expected)
+                << "row=" << row << " col=" << col;
+        }
+    }
+    EXPECT_EQ(stats.global_load_count, 2 * kMatrixSize);
+    EXPECT_EQ(stats.global_store_count, kMatrixSize);
+    EXPECT_EQ(stats.shared_load_count, 16 * kMatrixSize);
+    EXPECT_EQ(stats.shared_store_count, 2 * kMatrixSize);
+    EXPECT_EQ(stats.barrier_issue_count, 2u);
+}
+
 }  // namespace

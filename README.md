@@ -20,6 +20,7 @@
   - `branch_demo`
   - `shared_exchange`
   - `block_reduction`
+  - `tiled_matmul`
 
 ## 指令子集
 
@@ -30,6 +31,7 @@
 - `mov_block_idx`
 - `mov_block_thread_idx`
 - `add`
+- `mul`
 - `and_imm`
 - `set_lt_imm`
 - `xor_imm`

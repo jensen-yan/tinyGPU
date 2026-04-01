@@ -140,4 +140,63 @@ Kernel make_block_reduction_kernel(std::int32_t in_base, std::int32_t out_base) 
     return kernel;
 }
 
+Kernel make_tiled_matmul_kernel(std::int32_t a_base, std::int32_t b_base, std::int32_t c_base) {
+    Kernel kernel;
+    kernel.name = "tiled_matmul";
+    auto& insts = kernel.instructions;
+
+    // v0 matmul uses one 8x8 block to compute one 8x8 output tile.
+    // Each thread owns one output element C[row][col], where:
+    //   row = local_tid / 8
+    //   col = local_tid % 8
+    //
+    // Shared layout:
+    //   shared[0..63]   -> A tile
+    //   shared[64..127] -> B tile
+
+    // Stage 1: each thread loads one A element and one B element from
+    // global memory into block-local shared memory.
+    insts.push_back(Instruction{OpCode::MovThreadIdx, 0, 0, 0, 0, 0, 0});
+    insts.push_back(Instruction{OpCode::MovBlockThreadIdx, 1, 0, 0, 0, 0, 0});
+
+    insts.push_back(Instruction{OpCode::MovImm, 2, 0, 0, a_base, 0, 0});
+    insts.push_back(Instruction{OpCode::Add, 3, 1, 2, 0, 0, 0});
+    insts.push_back(Instruction{OpCode::LoadGlobal, 4, 3, 0, 0, 0, 0});
+    insts.push_back(Instruction{OpCode::StoreShared, 0, 1, 4, 0, 0, 0});
+
+    insts.push_back(Instruction{OpCode::MovImm, 2, 0, 0, b_base, 0, 0});
+    insts.push_back(Instruction{OpCode::Add, 3, 1, 2, 0, 0, 0});
+    insts.push_back(Instruction{OpCode::LoadGlobal, 4, 3, 0, 0, 0, 0});
+    insts.push_back(Instruction{OpCode::MovImm, 2, 0, 0, 64, 0, 0});
+    insts.push_back(Instruction{OpCode::Add, 3, 1, 2, 0, 0, 0});
+    insts.push_back(Instruction{OpCode::StoreShared, 0, 3, 4, 0, 0, 0});
+    insts.push_back(Instruction{OpCode::Barrier, 0, 0, 0, 0, 0, 0});
+
+    // Stage 2: derive row_base and col from the block-local thread id.
+    insts.push_back(Instruction{OpCode::MovImm, 4, 0, 0, 0, 0, 0});    // accumulator
+    insts.push_back(Instruction{OpCode::AndImm, 5, 1, 0, 56, 0, 0});   // row * 8
+    insts.push_back(Instruction{OpCode::AndImm, 6, 1, 0, 7, 0, 0});    // col
+
+    // Stage 3: unrolled dot product across the shared A/B tiles.
+    for (int k = 0; k < 8; ++k) {
+        insts.push_back(Instruction{OpCode::MovImm, 2, 0, 0, k, 0, 0});
+        insts.push_back(Instruction{OpCode::Add, 3, 5, 2, 0, 0, 0});
+        insts.push_back(Instruction{OpCode::LoadShared, 7, 3, 0, 0, 0, 0});
+
+        insts.push_back(Instruction{OpCode::MovImm, 2, 0, 0, 64 + k * 8, 0, 0});
+        insts.push_back(Instruction{OpCode::Add, 3, 6, 2, 0, 0, 0});
+        insts.push_back(Instruction{OpCode::LoadShared, 8, 3, 0, 0, 0, 0});
+
+        insts.push_back(Instruction{OpCode::Mul, 9, 7, 8, 0, 0, 0});
+        insts.push_back(Instruction{OpCode::Add, 4, 4, 9, 0, 0, 0});
+    }
+
+    // Stage 4: write C[row][col] back to global memory.
+    insts.push_back(Instruction{OpCode::MovImm, 2, 0, 0, c_base, 0, 0});
+    insts.push_back(Instruction{OpCode::Add, 3, 1, 2, 0, 0, 0});
+    insts.push_back(Instruction{OpCode::StoreGlobal, 0, 3, 4, 0, 0, 0});
+    insts.push_back(Instruction{OpCode::Exit, 0, 0, 0, 0, 0, 0});
+    return kernel;
+}
+
 }  // namespace tinygpu
