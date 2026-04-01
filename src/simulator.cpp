@@ -4,6 +4,7 @@
 #include <stdexcept>
 
 namespace tinygpu {
+
 bool Simulator::has_live_threads(const WarpState& warp, const std::vector<bool>& mask) const {
     for (std::size_t lane = 0; lane < warp.threads.size(); ++lane) {
         if (mask[lane] && !warp.threads[lane].done) {
@@ -17,6 +18,29 @@ bool Simulator::all_threads_done(const WarpState& warp) const {
     return std::all_of(warp.threads.begin(), warp.threads.end(), [](const ThreadState& thread) {
         return thread.done;
     });
+}
+
+std::size_t Simulator::active_lane_count(const WarpState& warp) const {
+    std::size_t count = 0;
+    for (std::size_t lane = 0; lane < warp.threads.size(); ++lane) {
+        if (warp.active_mask[lane] && !warp.threads[lane].done) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+StallReason Simulator::stall_reason(const WarpState& warp) const {
+    if (warp.done) {
+        return StallReason::Completed;
+    }
+    if (warp.waiting_on_memory) {
+        return StallReason::WaitingGlobalMemory;
+    }
+    if (warp.waiting_on_barrier) {
+        return StallReason::WaitingBarrier;
+    }
+    return StallReason::Ready;
 }
 
 void Simulator::advance_reconvergence(WarpState& warp) {
@@ -47,6 +71,22 @@ void Simulator::advance_reconvergence(WarpState& warp) {
     }
 }
 
+void Simulator::complete_pending_global_loads(WarpState& warp, std::size_t cycle) {
+    if (!warp.waiting_on_memory || !warp.pending_global_load.valid || cycle < warp.pending_global_load.ready_cycle) {
+        return;
+    }
+
+    for (std::size_t lane = 0; lane < warp.threads.size(); ++lane) {
+        if (!warp.pending_global_load.lane_mask[lane] || warp.threads[lane].done) {
+            continue;
+        }
+        warp.threads[lane].registers.at(warp.pending_global_load.dst) = warp.pending_global_load.values[lane];
+    }
+
+    warp.waiting_on_memory = false;
+    warp.pending_global_load = WarpState::PendingGlobalLoad{};
+}
+
 Simulator::Simulator(Config config)
     : config_(config),
       global_memory_(config.global_memory_words, 0) {
@@ -67,6 +107,9 @@ Simulator::Simulator(Config config)
     }
     if (config_.shared_memory_words == 0) {
         throw std::invalid_argument("shared_memory_words must be greater than zero");
+    }
+    if (config_.global_memory_latency == 0) {
+        throw std::invalid_argument("global_memory_latency must be greater than zero");
     }
 }
 
@@ -107,12 +150,14 @@ std::vector<Simulator::BlockState> Simulator::build_blocks(const Kernel& kernel)
     return blocks;
 }
 
-bool Simulator::step_warp(const Kernel& kernel, BlockState& block, WarpState& warp) {
-    if (warp.done) {
-        return false;
-    }
-    if (warp.waiting_on_barrier) {
-        return false;
+Simulator::StepResult Simulator::step_warp(
+    const Kernel& kernel,
+    BlockState& block,
+    WarpState& warp,
+    std::size_t cycle) {
+    StepResult result;
+    if (warp.done || warp.waiting_on_barrier || warp.waiting_on_memory) {
+        return result;
     }
 
     // Before issuing another instruction, see whether a previously divergent
@@ -120,17 +165,18 @@ bool Simulator::step_warp(const Kernel& kernel, BlockState& block, WarpState& wa
     advance_reconvergence(warp);
     if (!has_live_threads(warp, warp.active_mask)) {
         warp.done = all_threads_done(warp);
-        return false;
+        return result;
     }
 
     if (warp.pc >= kernel.instructions.size()) {
         warp.done = all_threads_done(warp);
-        return false;
+        return result;
     }
 
-    bool issued = false;
     const Instruction& inst = kernel.instructions[warp.pc];
-    issued = true;
+    result.issued = true;
+    result.issued_pc = warp.pc;
+    result.issued_opcode = inst.opcode;
 
     switch (inst.opcode) {
     case OpCode::MovImm:
@@ -196,8 +242,7 @@ bool Simulator::step_warp(const Kernel& kernel, BlockState& block, WarpState& wa
             if (!warp.active_mask[lane] || warp.threads[lane].done) {
                 continue;
             }
-            warp.threads[lane].registers.at(inst.dst) =
-                warp.threads[lane].registers.at(inst.src0) & inst.imm;
+            warp.threads[lane].registers.at(inst.dst) = warp.threads[lane].registers.at(inst.src0) & inst.imm;
         }
         ++warp.pc;
         break;
@@ -216,19 +261,37 @@ bool Simulator::step_warp(const Kernel& kernel, BlockState& block, WarpState& wa
             if (!warp.active_mask[lane] || warp.threads[lane].done) {
                 continue;
             }
-            warp.threads[lane].registers.at(inst.dst) =
-                warp.threads[lane].registers.at(inst.src0) ^ inst.imm;
+            warp.threads[lane].registers.at(inst.dst) = warp.threads[lane].registers.at(inst.src0) ^ inst.imm;
         }
         ++warp.pc;
         break;
     case OpCode::LoadGlobal:
-        for (std::size_t lane = 0; lane < warp.threads.size(); ++lane) {
-            if (!warp.active_mask[lane] || warp.threads[lane].done) {
-                continue;
+        if (config_.global_memory_latency <= 1) {
+            for (std::size_t lane = 0; lane < warp.threads.size(); ++lane) {
+                if (!warp.active_mask[lane] || warp.threads[lane].done) {
+                    continue;
+                }
+                const std::size_t address = static_cast<std::size_t>(warp.threads[lane].registers.at(inst.src0));
+                warp.threads[lane].registers.at(inst.dst) = static_cast<std::int32_t>(global_memory_.at(address));
+                ++current_stats_.global_load_count;
             }
-            const std::size_t address = static_cast<std::size_t>(warp.threads[lane].registers.at(inst.src0));
-            warp.threads[lane].registers.at(inst.dst) = static_cast<std::int32_t>(global_memory_.at(address));
-            ++current_stats_.global_load_count;
+        } else {
+            warp.waiting_on_memory = true;
+            warp.pending_global_load.valid = true;
+            warp.pending_global_load.ready_cycle = cycle + config_.global_memory_latency;
+            warp.pending_global_load.dst = inst.dst;
+            warp.pending_global_load.lane_mask.assign(warp.threads.size(), false);
+            warp.pending_global_load.values.assign(warp.threads.size(), 0);
+
+            for (std::size_t lane = 0; lane < warp.threads.size(); ++lane) {
+                if (!warp.active_mask[lane] || warp.threads[lane].done) {
+                    continue;
+                }
+                const std::size_t address = static_cast<std::size_t>(warp.threads[lane].registers.at(inst.src0));
+                warp.pending_global_load.lane_mask[lane] = true;
+                warp.pending_global_load.values[lane] = static_cast<std::int32_t>(global_memory_.at(address));
+                ++current_stats_.global_load_count;
+            }
         }
         ++warp.pc;
         break;
@@ -296,11 +359,9 @@ bool Simulator::step_warp(const Kernel& kernel, BlockState& block, WarpState& wa
             warp.pc = inst.target;
             ++current_stats_.divergent_branch_count;
         } else if (any_taken) {
-            // Uniform taken branch: no reconvergence bookkeeping needed.
             warp.active_mask = std::move(taken_mask);
             warp.pc = inst.target;
         } else {
-            // Uniform fallthrough branch.
             warp.active_mask = std::move(fallthrough_mask);
             ++warp.pc;
         }
@@ -350,12 +411,17 @@ bool Simulator::step_warp(const Kernel& kernel, BlockState& block, WarpState& wa
 
     advance_reconvergence(warp);
     warp.done = all_threads_done(warp);
-    return issued;
+    return result;
 }
 
 Stats Simulator::run(const Kernel& kernel) {
+    return run_with_trace(kernel).stats;
+}
+
+RunReport Simulator::run_with_trace(const Kernel& kernel) {
     auto blocks = build_blocks(kernel);
     current_stats_ = Stats{};
+    last_timeline_.clear();
 
     struct ResidentWarp {
         BlockState* block = nullptr;
@@ -370,42 +436,95 @@ Stats Simulator::run(const Kernel& kernel) {
     }
 
     if (resident_warps.empty()) {
-        return current_stats_;
+        return RunReport{current_stats_, last_timeline_};
     }
 
     std::size_t next_warp = 0;
     while (current_stats_.cycles < config_.max_cycles) {
-        bool any_progress = false;
-        bool all_done = true;
+        for (ResidentWarp& entry : resident_warps) {
+            complete_pending_global_loads(*entry.warp, current_stats_.cycles);
+        }
 
+        bool all_done = true;
         for (const ResidentWarp& entry : resident_warps) {
             if (!entry.warp->done) {
                 all_done = false;
                 break;
             }
         }
-
         if (all_done) {
             break;
         }
 
+        bool had_issue = false;
+        std::size_t issued_entry_index = 0;
+        StepResult step_result;
+
         for (std::size_t attempt = 0; attempt < resident_warps.size(); ++attempt) {
-            ResidentWarp& entry = resident_warps[(next_warp + attempt) % resident_warps.size()];
+            const std::size_t entry_index = (next_warp + attempt) % resident_warps.size();
+            ResidentWarp& entry = resident_warps[entry_index];
             WarpState& warp = *entry.warp;
-            if (warp.done || warp.waiting_on_barrier) {
+            if (warp.done || warp.waiting_on_barrier || warp.waiting_on_memory) {
                 continue;
             }
+
             // Round-robin scheduling keeps the execution order simple and visible.
-            if (step_warp(kernel, *entry.block, warp)) {
+            step_result = step_warp(kernel, *entry.block, warp, current_stats_.cycles);
+            if (step_result.issued) {
                 ++current_stats_.warp_issue_count;
-                next_warp = (next_warp + attempt + 1) % resident_warps.size();
-                any_progress = true;
+                next_warp = (entry_index + 1) % resident_warps.size();
+                had_issue = true;
+                issued_entry_index = entry_index;
                 break;
             }
         }
 
+        CycleTrace cycle_trace;
+        cycle_trace.cycle = current_stats_.cycles;
+        cycle_trace.had_issue = had_issue;
+
+        bool any_memory_wait = false;
+        bool any_barrier_wait = false;
+        for (std::size_t index = 0; index < resident_warps.size(); ++index) {
+            const ResidentWarp& entry = resident_warps[index];
+            WarpTraceState warp_trace;
+            warp_trace.block_index = entry.warp->block_index;
+            warp_trace.warp_index = entry.warp->warp_index;
+            warp_trace.pc = entry.warp->pc;
+            warp_trace.active_lanes = active_lane_count(*entry.warp);
+            warp_trace.stall_reason = stall_reason(*entry.warp);
+            warp_trace.issued = had_issue && index == issued_entry_index;
+            if (warp_trace.issued) {
+                warp_trace.issued_pc = step_result.issued_pc;
+                warp_trace.issued_opcode = step_result.issued_opcode;
+            }
+
+            any_memory_wait = any_memory_wait || warp_trace.stall_reason == StallReason::WaitingGlobalMemory;
+            any_barrier_wait = any_barrier_wait || warp_trace.stall_reason == StallReason::WaitingBarrier;
+            cycle_trace.warps.push_back(std::move(warp_trace));
+        }
+
+        if (!had_issue) {
+            ++current_stats_.idle_cycle_count;
+        }
+        if (any_memory_wait) {
+            ++current_stats_.cycles_with_memory_wait;
+        }
+        if (any_barrier_wait) {
+            ++current_stats_.cycles_with_barrier_wait;
+        }
+        last_timeline_.push_back(std::move(cycle_trace));
+
         ++current_stats_.cycles;
-        if (!any_progress) {
+
+        bool has_pending_work = false;
+        for (const ResidentWarp& entry : resident_warps) {
+            if (!entry.warp->done && (entry.warp->waiting_on_memory || entry.warp->waiting_on_barrier)) {
+                has_pending_work = true;
+                break;
+            }
+        }
+        if (!had_issue && !has_pending_work) {
             break;
         }
     }
@@ -416,7 +535,7 @@ Stats Simulator::run(const Kernel& kernel) {
         }
     }
 
-    return current_stats_;
+    return RunReport{current_stats_, last_timeline_};
 }
 
 void Simulator::write_global(std::size_t index, std::int32_t value) {
@@ -429,6 +548,10 @@ std::int32_t Simulator::read_global(std::size_t index) const {
 
 std::size_t Simulator::global_memory_size() const {
     return global_memory_.size();
+}
+
+const std::vector<CycleTrace>& Simulator::last_timeline() const {
+    return last_timeline_;
 }
 
 }  // namespace tinygpu

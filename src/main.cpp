@@ -1,3 +1,4 @@
+#include "tinygpu/disasm.h"
 #include "tinygpu/kernels.h"
 #include "tinygpu/simulator.h"
 
@@ -5,6 +6,21 @@
 #include <iostream>
 
 namespace {
+
+void print_common_stats(const tinygpu::Stats& stats) {
+    std::cout << "cycles: " << stats.cycles << "\n";
+    std::cout << "warp_issues: " << stats.warp_issue_count << "\n";
+    std::cout << "idle_cycles: " << stats.idle_cycle_count << "\n";
+    std::cout << "cycles_with_memory_wait: " << stats.cycles_with_memory_wait << "\n";
+    std::cout << "cycles_with_barrier_wait: " << stats.cycles_with_barrier_wait << "\n";
+    std::cout << "global_loads: " << stats.global_load_count << "\n";
+    std::cout << "global_stores: " << stats.global_store_count << "\n";
+    std::cout << "shared_loads: " << stats.shared_load_count << "\n";
+    std::cout << "shared_stores: " << stats.shared_store_count << "\n";
+    std::cout << "barriers: " << stats.barrier_issue_count << "\n";
+    std::cout << "divergent_branches: " << stats.divergent_branch_count << "\n";
+    std::cout << "completed_warps: " << stats.completed_warps << "\n";
+}
 
 bool run_vector_add_demo(tinygpu::Simulator& simulator, const tinygpu::Config& config) {
     const std::size_t element_count = config.block_count * config.threads_per_block;
@@ -41,15 +57,7 @@ bool run_vector_add_demo(tinygpu::Simulator& simulator, const tinygpu::Config& c
     std::cout << "tinyGPU vector add demo\n";
     std::cout << "kernel: " << kernel.name << "\n";
     std::cout << "threads: " << element_count << "\n";
-    std::cout << "cycles: " << stats.cycles << "\n";
-    std::cout << "warp_issues: " << stats.warp_issue_count << "\n";
-    std::cout << "global_loads: " << stats.global_load_count << "\n";
-    std::cout << "global_stores: " << stats.global_store_count << "\n";
-    std::cout << "shared_loads: " << stats.shared_load_count << "\n";
-    std::cout << "shared_stores: " << stats.shared_store_count << "\n";
-    std::cout << "barriers: " << stats.barrier_issue_count << "\n";
-    std::cout << "divergent_branches: " << stats.divergent_branch_count << "\n";
-    std::cout << "completed_warps: " << stats.completed_warps << "\n";
+    print_common_stats(stats);
     std::cout << "sample C[0]: " << simulator.read_global(c_base) << "\n";
     std::cout << "sample C[last]: " << simulator.read_global(c_base + element_count - 1) << "\n";
     std::cout << "status: " << (ok ? "PASS" : "FAIL") << "\n\n";
@@ -70,7 +78,8 @@ bool run_branch_demo(tinygpu::Simulator& simulator, const tinygpu::Config& confi
     }
 
     const tinygpu::Kernel kernel = tinygpu::make_branch_demo_kernel(static_cast<std::int32_t>(out_base));
-    const tinygpu::Stats stats = simulator.run(kernel);
+    const tinygpu::RunReport report = simulator.run_with_trace(kernel);
+    const tinygpu::Stats& stats = report.stats;
 
     bool ok = true;
     for (std::size_t i = 0; i < element_count; ++i) {
@@ -84,15 +93,17 @@ bool run_branch_demo(tinygpu::Simulator& simulator, const tinygpu::Config& confi
     std::cout << "tinyGPU branch demo\n";
     std::cout << "kernel: " << kernel.name << "\n";
     std::cout << "threads: " << element_count << "\n";
-    std::cout << "cycles: " << stats.cycles << "\n";
-    std::cout << "warp_issues: " << stats.warp_issue_count << "\n";
-    std::cout << "global_loads: " << stats.global_load_count << "\n";
-    std::cout << "global_stores: " << stats.global_store_count << "\n";
-    std::cout << "shared_loads: " << stats.shared_load_count << "\n";
-    std::cout << "shared_stores: " << stats.shared_store_count << "\n";
-    std::cout << "barriers: " << stats.barrier_issue_count << "\n";
-    std::cout << "divergent_branches: " << stats.divergent_branch_count << "\n";
-    std::cout << "completed_warps: " << stats.completed_warps << "\n";
+    print_common_stats(stats);
+
+    const std::string text_trace = tinygpu::render_timeline_text(kernel, report.timeline);
+    std::cout << "trace_preview:\n";
+    const std::size_t preview_end = text_trace.find("cycle 4");
+    if (preview_end != std::string::npos) {
+        std::cout << text_trace.substr(0, preview_end);
+    } else {
+        std::cout << text_trace;
+    }
+
     std::cout << "sample out[0]: " << simulator.read_global(out_base) << "\n";
     std::cout << "sample out[1]: " << simulator.read_global(out_base + 1) << "\n";
     std::cout << "status: " << (ok ? "PASS" : "FAIL") << "\n";
@@ -128,15 +139,7 @@ bool run_shared_exchange_demo(tinygpu::Simulator& simulator, const tinygpu::Conf
     std::cout << "tinyGPU shared exchange demo\n";
     std::cout << "kernel: " << kernel.name << "\n";
     std::cout << "threads: " << element_count << "\n";
-    std::cout << "cycles: " << stats.cycles << "\n";
-    std::cout << "warp_issues: " << stats.warp_issue_count << "\n";
-    std::cout << "global_loads: " << stats.global_load_count << "\n";
-    std::cout << "global_stores: " << stats.global_store_count << "\n";
-    std::cout << "shared_loads: " << stats.shared_load_count << "\n";
-    std::cout << "shared_stores: " << stats.shared_store_count << "\n";
-    std::cout << "barriers: " << stats.barrier_issue_count << "\n";
-    std::cout << "divergent_branches: " << stats.divergent_branch_count << "\n";
-    std::cout << "completed_warps: " << stats.completed_warps << "\n";
+    print_common_stats(stats);
     std::cout << "sample out[0]: " << simulator.read_global(out_base) << "\n";
     std::cout << "sample out[32]: " << simulator.read_global(out_base + 32) << "\n";
     std::cout << "status: " << (ok ? "PASS" : "FAIL") << "\n";
@@ -163,7 +166,8 @@ bool run_block_reduction_demo(tinygpu::Simulator& simulator, const tinygpu::Conf
     const tinygpu::Kernel kernel = tinygpu::make_block_reduction_kernel(
         static_cast<std::int32_t>(in_base),
         static_cast<std::int32_t>(out_base));
-    const tinygpu::Stats stats = simulator.run(kernel);
+    const tinygpu::RunReport report = simulator.run_with_trace(kernel);
+    const tinygpu::Stats& stats = report.stats;
 
     bool ok = true;
     for (std::size_t block = 0; block < config.block_count; ++block) {
@@ -176,15 +180,8 @@ bool run_block_reduction_demo(tinygpu::Simulator& simulator, const tinygpu::Conf
     std::cout << "tinyGPU block reduction demo\n";
     std::cout << "kernel: " << kernel.name << "\n";
     std::cout << "threads: " << element_count << "\n";
-    std::cout << "cycles: " << stats.cycles << "\n";
-    std::cout << "warp_issues: " << stats.warp_issue_count << "\n";
-    std::cout << "global_loads: " << stats.global_load_count << "\n";
-    std::cout << "global_stores: " << stats.global_store_count << "\n";
-    std::cout << "shared_loads: " << stats.shared_load_count << "\n";
-    std::cout << "shared_stores: " << stats.shared_store_count << "\n";
-    std::cout << "barriers: " << stats.barrier_issue_count << "\n";
-    std::cout << "divergent_branches: " << stats.divergent_branch_count << "\n";
-    std::cout << "completed_warps: " << stats.completed_warps << "\n";
+    print_common_stats(stats);
+    std::cout << "html_trace_bytes: " << tinygpu::render_timeline_html(kernel, report.timeline).size() << "\n";
     std::cout << "sample block_sum[0]: " << simulator.read_global(out_base) << "\n";
     std::cout << "sample block_sum[1]: " << simulator.read_global(out_base + 1) << "\n";
     std::cout << "status: " << (ok ? "PASS" : "FAIL") << "\n";
@@ -195,6 +192,7 @@ bool run_tiled_matmul_demo() {
     tinygpu::Config config;
     config.block_count = 1;
     config.register_count = 10;
+    config.global_memory_latency = 3;
 
     tinygpu::Simulator simulator(config);
     constexpr std::size_t kDim = 8;
@@ -221,7 +219,8 @@ bool run_tiled_matmul_demo() {
         static_cast<std::int32_t>(a_base),
         static_cast<std::int32_t>(b_base),
         static_cast<std::int32_t>(c_base));
-    const tinygpu::Stats stats = simulator.run(kernel);
+    const tinygpu::RunReport report = simulator.run_with_trace(kernel);
+    const tinygpu::Stats& stats = report.stats;
 
     bool ok = true;
     for (std::size_t row = 0; row < kDim; ++row) {
@@ -245,15 +244,8 @@ bool run_tiled_matmul_demo() {
     std::cout << "tinyGPU tiled matmul demo\n";
     std::cout << "kernel: " << kernel.name << "\n";
     std::cout << "threads: " << kMatrixSize << "\n";
-    std::cout << "cycles: " << stats.cycles << "\n";
-    std::cout << "warp_issues: " << stats.warp_issue_count << "\n";
-    std::cout << "global_loads: " << stats.global_load_count << "\n";
-    std::cout << "global_stores: " << stats.global_store_count << "\n";
-    std::cout << "shared_loads: " << stats.shared_load_count << "\n";
-    std::cout << "shared_stores: " << stats.shared_store_count << "\n";
-    std::cout << "barriers: " << stats.barrier_issue_count << "\n";
-    std::cout << "divergent_branches: " << stats.divergent_branch_count << "\n";
-    std::cout << "completed_warps: " << stats.completed_warps << "\n";
+    print_common_stats(stats);
+    std::cout << "trace_rows: " << report.timeline.size() << "\n";
     std::cout << "sample C[0]: " << simulator.read_global(c_base) << "\n";
     std::cout << "sample C[7]: " << simulator.read_global(c_base + 7) << "\n";
     std::cout << "sample C[last]: " << simulator.read_global(c_base + kMatrixSize - 1) << "\n";

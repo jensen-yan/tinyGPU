@@ -14,6 +14,7 @@
 - `global memory` 与 `shared memory`
 - 基础分支发散与 reconvergence
 - `barrier` 同步
+- 可导出的 warp timeline / stall trace
 - 一组教学用 kernel：
   - `bootstrap`
   - `vector_add`
@@ -84,6 +85,14 @@ ctest --test-dir build --output-on-failure
 如果想把教学 kernel 打印成更像小汇编的可读列表，可以使用：
 
 - `tinygpu::disassemble_kernel(kernel)`
+
+如果想观察每个 cycle 的 warp 调度、barrier 等待和 global memory stall，可以使用：
+
+- `simulator.run_with_trace(kernel)`
+- `tinygpu::render_timeline_text(kernel, report.timeline)`
+- `tinygpu::render_timeline_html(kernel, report.timeline)`
+
+其中 HTML 版本会把每个 cycle 的 warp 状态渲染成时间线表格，适合作为后续更完整可视化的基础。
 
 ## 项目边界
 

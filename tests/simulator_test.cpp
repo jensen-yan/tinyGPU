@@ -75,6 +75,7 @@ TEST(SimulatorTest, VectorAddKernelProducesExpectedOutput) {
     EXPECT_EQ(stats.global_load_count, 2 * thread_count);
     EXPECT_EQ(stats.global_store_count, thread_count);
     EXPECT_EQ(stats.divergent_branch_count, 0u);
+    EXPECT_EQ(stats.idle_cycle_count, 0u);
 }
 
 TEST(SimulatorTest, BranchDemoProducesEvenOddSplit) {
@@ -215,6 +216,77 @@ TEST(SimulatorTest, DisassemblerRendersReadableBranchKernel) {
     EXPECT_NE(text.find("target="), std::string::npos);
     EXPECT_NE(text.find("join="), std::string::npos);
     EXPECT_NE(text.find("store_global [r2], r4"), std::string::npos);
+}
+
+TEST(SimulatorTest, RunWithTraceCapturesTimelineAndHtmlView) {
+    const tinygpu::Config config = default_config();
+    tinygpu::Simulator simulator(config);
+
+    const tinygpu::Kernel kernel = tinygpu::make_branch_demo_kernel(192);
+    const tinygpu::RunReport report = simulator.run_with_trace(kernel);
+
+    ASSERT_EQ(report.timeline.size(), report.stats.cycles);
+    ASSERT_FALSE(report.timeline.empty());
+    EXPECT_TRUE(report.timeline.front().had_issue);
+    EXPECT_EQ(report.timeline.front().warps.size(), 4u);
+    EXPECT_TRUE(report.timeline.front().warps.front().issued);
+
+    const std::string text = tinygpu::render_timeline_text(kernel, report.timeline);
+    EXPECT_NE(text.find("timeline branch_demo"), std::string::npos);
+    EXPECT_NE(text.find("cycle 0 issue"), std::string::npos);
+    EXPECT_NE(text.find("op=mov_thread_idx"), std::string::npos);
+
+    const std::string html = tinygpu::render_timeline_html(kernel, report.timeline);
+    EXPECT_NE(html.find("<table>"), std::string::npos);
+    EXPECT_NE(html.find("tinyGPU timeline: branch_demo"), std::string::npos);
+    EXPECT_NE(html.find("issue branch_if_zero"), std::string::npos);
+}
+
+TEST(SimulatorTest, GlobalMemoryLatencyCreatesMemoryWaitCycles) {
+    tinygpu::Config config = default_config();
+    config.block_count = 1;
+    config.threads_per_block = 32;
+    config.global_memory_latency = 3;
+    tinygpu::Simulator simulator(config);
+
+    const std::size_t thread_count = total_threads(config);
+    const std::size_t a_base = 0;
+    const std::size_t b_base = a_base + thread_count;
+    const std::size_t c_base = b_base + thread_count;
+    ASSERT_GE(simulator.global_memory_size(), c_base + thread_count);
+
+    for (std::size_t i = 0; i < thread_count; ++i) {
+        simulator.write_global(a_base + i, static_cast<std::int32_t>(i));
+        simulator.write_global(b_base + i, static_cast<std::int32_t>(1000 + i));
+        simulator.write_global(c_base + i, -1);
+    }
+
+    const tinygpu::Kernel kernel = tinygpu::make_vector_add_kernel(
+        static_cast<std::int32_t>(a_base),
+        static_cast<std::int32_t>(b_base),
+        static_cast<std::int32_t>(c_base));
+    const tinygpu::RunReport report = simulator.run_with_trace(kernel);
+
+    for (std::size_t i = 0; i < thread_count; ++i) {
+        EXPECT_EQ(simulator.read_global(c_base + i), static_cast<std::int32_t>(1000 + 2 * i)) << "index " << i;
+    }
+    EXPECT_GT(report.stats.cycles, 12u);
+    EXPECT_GT(report.stats.idle_cycle_count, 0u);
+    EXPECT_GT(report.stats.cycles_with_memory_wait, 0u);
+
+    bool saw_memory_wait = false;
+    for (const tinygpu::CycleTrace& cycle : report.timeline) {
+        for (const tinygpu::WarpTraceState& warp : cycle.warps) {
+            if (warp.stall_reason == tinygpu::StallReason::WaitingGlobalMemory) {
+                saw_memory_wait = true;
+                break;
+            }
+        }
+        if (saw_memory_wait) {
+            break;
+        }
+    }
+    EXPECT_TRUE(saw_memory_wait);
 }
 
 }  // namespace
