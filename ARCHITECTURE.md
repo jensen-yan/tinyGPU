@@ -59,10 +59,11 @@
 - `mov_imm`
 - `mov_thread_idx`
 - `add`
+- `and_imm`
 - `mul`
 - `load_global`
 - `store_global`
-- `branch_if`
+- `branch_if_zero`
 - `barrier`
 - `exit`
 

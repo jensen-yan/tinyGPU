@@ -1,10 +1,35 @@
 #include "tinygpu/simulator.h"
 
 #include <algorithm>
-#include <iostream>
 #include <stdexcept>
 
 namespace tinygpu {
+bool Simulator::has_live_threads(const WarpState& warp, const std::vector<bool>& mask) const {
+    for (std::size_t lane = 0; lane < warp.threads.size(); ++lane) {
+        if (mask[lane] && !warp.threads[lane].done) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool Simulator::all_threads_done(const WarpState& warp) const {
+    return std::all_of(warp.threads.begin(), warp.threads.end(), [](const ThreadState& thread) {
+        return thread.done;
+    });
+}
+
+void Simulator::restore_next_path(WarpState& warp) {
+    while (!warp.pending_paths.empty()) {
+        WarpState::ExecContext ctx = std::move(warp.pending_paths.back());
+        warp.pending_paths.pop_back();
+        if (has_live_threads(warp, ctx.active_mask)) {
+            warp.pc = ctx.pc;
+            warp.active_mask = std::move(ctx.active_mask);
+            return;
+        }
+    }
+}
 
 Simulator::Simulator(Config config)
     : config_(config),
@@ -43,6 +68,7 @@ std::vector<Simulator::BlockState> Simulator::build_blocks(const Kernel& kernel)
             WarpState warp;
             warp.warp_index = warp_index;
             warp.block_index = block_index;
+            warp.pc = 0;
             warp.active_mask.assign(config_.warp_size, true);
             warp.threads.reserve(config_.warp_size);
 
@@ -67,63 +93,132 @@ bool Simulator::step_warp(const Kernel& kernel, WarpState& warp) {
         return false;
     }
 
-    bool issued = false;
-
-    for (std::size_t lane = 0; lane < warp.threads.size(); ++lane) {
-        if (!warp.active_mask[lane]) {
-            continue;
-        }
-
-        ThreadState& thread = warp.threads[lane];
-        if (thread.done) {
-            continue;
-        }
-        if (thread.pc >= kernel.instructions.size()) {
-            thread.done = true;
-            continue;
-        }
-
-        const Instruction& inst = kernel.instructions[thread.pc];
-        issued = true;
-
-        switch (inst.opcode) {
-        case OpCode::MovImm:
-            thread.registers.at(inst.dst) = inst.imm;
-            ++thread.pc;
-            break;
-        case OpCode::MovThreadIdx:
-            thread.registers.at(inst.dst) = static_cast<std::int32_t>(thread.thread_index);
-            ++thread.pc;
-            break;
-        case OpCode::Add:
-            thread.registers.at(inst.dst) =
-                thread.registers.at(inst.src0) + thread.registers.at(inst.src1);
-            ++thread.pc;
-            break;
-        case OpCode::LoadGlobal: {
-            const std::size_t address = static_cast<std::size_t>(thread.registers.at(inst.src0));
-            thread.registers.at(inst.dst) = static_cast<std::int32_t>(global_memory_.at(address));
-            ++current_stats_.global_load_count;
-            ++thread.pc;
-            break;
-        }
-        case OpCode::StoreGlobal: {
-            const std::size_t address = static_cast<std::size_t>(thread.registers.at(inst.src0));
-            global_memory_.at(address) = thread.registers.at(inst.src1);
-            ++current_stats_.global_store_count;
-            ++thread.pc;
-            break;
-        }
-        case OpCode::Exit:
-            thread.done = true;
-            ++thread.pc;
-            break;
+    if (!has_live_threads(warp, warp.active_mask)) {
+        restore_next_path(warp);
+        if (!has_live_threads(warp, warp.active_mask)) {
+            warp.done = all_threads_done(warp);
+            return false;
         }
     }
 
-    warp.done = std::all_of(warp.threads.begin(), warp.threads.end(), [](const ThreadState& thread) {
-        return thread.done;
-    });
+    if (warp.pc >= kernel.instructions.size()) {
+        warp.done = all_threads_done(warp);
+        return false;
+    }
+
+    bool issued = false;
+    const Instruction& inst = kernel.instructions[warp.pc];
+    issued = true;
+
+    switch (inst.opcode) {
+    case OpCode::MovImm:
+        for (std::size_t lane = 0; lane < warp.threads.size(); ++lane) {
+            if (!warp.active_mask[lane] || warp.threads[lane].done) {
+                continue;
+            }
+            warp.threads[lane].registers.at(inst.dst) = inst.imm;
+        }
+        ++warp.pc;
+        break;
+    case OpCode::MovThreadIdx:
+        for (std::size_t lane = 0; lane < warp.threads.size(); ++lane) {
+            if (!warp.active_mask[lane] || warp.threads[lane].done) {
+                continue;
+            }
+            warp.threads[lane].registers.at(inst.dst) = static_cast<std::int32_t>(warp.threads[lane].thread_index);
+        }
+        ++warp.pc;
+        break;
+    case OpCode::Add:
+        for (std::size_t lane = 0; lane < warp.threads.size(); ++lane) {
+            if (!warp.active_mask[lane] || warp.threads[lane].done) {
+                continue;
+            }
+            warp.threads[lane].registers.at(inst.dst) =
+                warp.threads[lane].registers.at(inst.src0) + warp.threads[lane].registers.at(inst.src1);
+        }
+        ++warp.pc;
+        break;
+    case OpCode::AndImm:
+        for (std::size_t lane = 0; lane < warp.threads.size(); ++lane) {
+            if (!warp.active_mask[lane] || warp.threads[lane].done) {
+                continue;
+            }
+            warp.threads[lane].registers.at(inst.dst) =
+                warp.threads[lane].registers.at(inst.src0) & inst.imm;
+        }
+        ++warp.pc;
+        break;
+    case OpCode::LoadGlobal:
+        for (std::size_t lane = 0; lane < warp.threads.size(); ++lane) {
+            if (!warp.active_mask[lane] || warp.threads[lane].done) {
+                continue;
+            }
+            const std::size_t address = static_cast<std::size_t>(warp.threads[lane].registers.at(inst.src0));
+            warp.threads[lane].registers.at(inst.dst) = static_cast<std::int32_t>(global_memory_.at(address));
+            ++current_stats_.global_load_count;
+        }
+        ++warp.pc;
+        break;
+    case OpCode::StoreGlobal:
+        for (std::size_t lane = 0; lane < warp.threads.size(); ++lane) {
+            if (!warp.active_mask[lane] || warp.threads[lane].done) {
+                continue;
+            }
+            const std::size_t address = static_cast<std::size_t>(warp.threads[lane].registers.at(inst.src0));
+            global_memory_.at(address) = warp.threads[lane].registers.at(inst.src1);
+            ++current_stats_.global_store_count;
+        }
+        ++warp.pc;
+        break;
+    case OpCode::BranchIfZero: {
+        std::vector<bool> taken_mask(warp.active_mask.size(), false);
+        std::vector<bool> fallthrough_mask(warp.active_mask.size(), false);
+
+        for (std::size_t lane = 0; lane < warp.threads.size(); ++lane) {
+            if (!warp.active_mask[lane] || warp.threads[lane].done) {
+                continue;
+            }
+            if (warp.threads[lane].registers.at(inst.src0) == 0) {
+                taken_mask[lane] = true;
+            } else {
+                fallthrough_mask[lane] = true;
+            }
+        }
+
+        const bool any_taken = has_live_threads(warp, taken_mask);
+        const bool any_fallthrough = has_live_threads(warp, fallthrough_mask);
+
+        if (any_taken && any_fallthrough) {
+            warp.pending_paths.push_back(WarpState::ExecContext{warp.pc + 1, fallthrough_mask});
+            warp.active_mask = std::move(taken_mask);
+            warp.pc = inst.target;
+            ++current_stats_.divergent_branch_count;
+        } else if (any_taken) {
+            warp.active_mask = std::move(taken_mask);
+            warp.pc = inst.target;
+        } else {
+            warp.active_mask = std::move(fallthrough_mask);
+            ++warp.pc;
+        }
+        break;
+    }
+    case OpCode::Exit:
+        for (std::size_t lane = 0; lane < warp.threads.size(); ++lane) {
+            if (!warp.active_mask[lane] || warp.threads[lane].done) {
+                continue;
+            }
+            warp.threads[lane].done = true;
+        }
+        ++warp.pc;
+        break;
+    }
+
+    if (!has_live_threads(warp, warp.active_mask)) {
+        restore_next_path(warp);
+    }
+
+    warp.done = all_threads_done(warp);
     return issued;
 }
 
@@ -226,6 +321,25 @@ Kernel make_vector_add_kernel(std::int32_t a_base, std::int32_t b_base, std::int
         Instruction{OpCode::Add, 2, 0, 1, 0},
         Instruction{OpCode::StoreGlobal, 2, 2, 7, 0},
         Instruction{OpCode::Exit, 0, 0, 0, 0},
+    };
+    return kernel;
+}
+
+Kernel make_branch_demo_kernel(std::int32_t out_base) {
+    Kernel kernel;
+    kernel.name = "branch_demo";
+    kernel.instructions = {
+        Instruction{OpCode::MovThreadIdx, 0, 0, 0, 0, 0},
+        Instruction{OpCode::MovImm, 1, 0, 0, out_base, 0},
+        Instruction{OpCode::Add, 2, 0, 1, 0, 0},
+        Instruction{OpCode::AndImm, 3, 0, 0, 1, 0},
+        Instruction{OpCode::BranchIfZero, 0, 3, 0, 0, 8},
+        Instruction{OpCode::MovImm, 4, 0, 0, 300, 0},
+        Instruction{OpCode::StoreGlobal, 0, 2, 4, 0, 0},
+        Instruction{OpCode::Exit, 0, 0, 0, 0, 0},
+        Instruction{OpCode::MovImm, 4, 0, 0, 200, 0},
+        Instruction{OpCode::StoreGlobal, 0, 2, 4, 0, 0},
+        Instruction{OpCode::Exit, 0, 0, 0, 0, 0},
     };
     return kernel;
 }

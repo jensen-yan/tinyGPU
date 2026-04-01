@@ -21,8 +21,10 @@ enum class OpCode {
     MovImm,
     MovThreadIdx,
     Add,
+    AndImm,
     LoadGlobal,
     StoreGlobal,
+    BranchIfZero,
     Exit,
 };
 
@@ -32,6 +34,7 @@ struct Instruction {
     std::uint32_t src0 = 0;
     std::uint32_t src1 = 0;
     std::int32_t imm = 0;
+    std::uint32_t target = 0;
 };
 
 struct Kernel {
@@ -44,6 +47,7 @@ struct Stats {
     std::size_t warp_issue_count = 0;
     std::size_t global_load_count = 0;
     std::size_t global_store_count = 0;
+    std::size_t divergent_branch_count = 0;
     std::size_t completed_warps = 0;
 };
 
@@ -59,17 +63,23 @@ public:
 private:
     struct ThreadState {
         std::size_t thread_index = 0;
-        std::size_t pc = 0;
         bool done = false;
         std::vector<std::int32_t> registers;
     };
 
     struct WarpState {
+        struct ExecContext {
+            std::size_t pc = 0;
+            std::vector<bool> active_mask;
+        };
+
         std::size_t warp_index = 0;
         std::size_t block_index = 0;
+        std::size_t pc = 0;
         bool done = false;
         std::vector<bool> active_mask;
         std::vector<ThreadState> threads;
+        std::vector<ExecContext> pending_paths;
     };
 
     struct BlockState {
@@ -83,10 +93,14 @@ private:
     Stats current_stats_;
 
     std::vector<BlockState> build_blocks(const Kernel& kernel) const;
+    bool has_live_threads(const WarpState& warp, const std::vector<bool>& mask) const;
+    bool all_threads_done(const WarpState& warp) const;
+    void restore_next_path(WarpState& warp);
     bool step_warp(const Kernel& kernel, WarpState& warp);
 };
 
 Kernel make_bootstrap_kernel();
 Kernel make_vector_add_kernel(std::int32_t a_base, std::int32_t b_base, std::int32_t c_base);
+Kernel make_branch_demo_kernel(std::int32_t out_base);
 
 }  // namespace tinygpu
