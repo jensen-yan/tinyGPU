@@ -1,106 +1,135 @@
+#include "tinygpu/kernel_builder.h"
 #include "tinygpu/kernels.h"
 
 namespace tinygpu {
 
 Kernel make_bootstrap_kernel() {
-    Kernel kernel;
-    kernel.name = "bootstrap";
-    kernel.instructions = {
-        Instruction{OpCode::MovImm, 0, 0, 0, 1, 0, 0},
-        Instruction{OpCode::MovImm, 1, 0, 0, 2, 0, 0},
-        Instruction{OpCode::Add, 2, 0, 1, 0, 0, 0},
-        Instruction{OpCode::Exit, 0, 0, 0, 0, 0, 0},
-    };
-    return kernel;
+    constexpr Register r0 = 0;
+    constexpr Register r1 = 1;
+    constexpr Register r2 = 2;
+
+    KernelBuilder kb("bootstrap");
+    kb.emit(mov_imm(r0, 1));
+    kb.emit(mov_imm(r1, 2));
+    kb.emit(add(r2, r0, r1));
+    kb.emit(exit_kernel());
+    return kb.build();
 }
 
 Kernel make_vector_add_kernel(std::int32_t a_base, std::int32_t b_base, std::int32_t c_base) {
-    Kernel kernel;
-    kernel.name = "vector_add";
-    kernel.instructions = {
-        // r0 = global thread index
-        Instruction{OpCode::MovThreadIdx, 0, 0, 0, 0, 0, 0},
-        // r2 = a_base + tid, r3 = A[tid]
-        Instruction{OpCode::MovImm, 1, 0, 0, a_base, 0, 0},
-        Instruction{OpCode::Add, 2, 0, 1, 0, 0, 0},
-        Instruction{OpCode::LoadGlobal, 3, 2, 0, 0, 0, 0},
-        // r5 = b_base + tid, r6 = B[tid]
-        Instruction{OpCode::MovImm, 4, 0, 0, b_base, 0, 0},
-        Instruction{OpCode::Add, 5, 0, 4, 0, 0, 0},
-        Instruction{OpCode::LoadGlobal, 6, 5, 0, 0, 0, 0},
-        // r7 = A[tid] + B[tid]
-        Instruction{OpCode::Add, 7, 3, 6, 0, 0, 0},
-        // r2 = c_base + tid, then store C[tid] = r7
-        Instruction{OpCode::MovImm, 1, 0, 0, c_base, 0, 0},
-        Instruction{OpCode::Add, 2, 0, 1, 0, 0, 0},
-        Instruction{OpCode::StoreGlobal, 0, 2, 7, 0, 0, 0},
-        Instruction{OpCode::Exit, 0, 0, 0, 0, 0, 0},
-    };
-    return kernel;
+    constexpr Register r_tid = 0;
+    constexpr Register r_base = 1;
+    constexpr Register r_addr = 2;
+    constexpr Register r_a = 3;
+    constexpr Register r_b_base = 4;
+    constexpr Register r_b_addr = 5;
+    constexpr Register r_b = 6;
+    constexpr Register r_sum = 7;
+
+    KernelBuilder kb("vector_add");
+
+    // r_tid = global thread index
+    kb.emit(mov_thread_idx(r_tid));
+    // r_addr = a_base + tid, r_a = A[tid]
+    kb.emit(mov_imm(r_base, a_base));
+    kb.emit(add(r_addr, r_tid, r_base));
+    kb.emit(load_global(r_a, r_addr));
+    // r_b_addr = b_base + tid, r_b = B[tid]
+    kb.emit(mov_imm(r_b_base, b_base));
+    kb.emit(add(r_b_addr, r_tid, r_b_base));
+    kb.emit(load_global(r_b, r_b_addr));
+    // r_sum = A[tid] + B[tid]
+    kb.emit(add(r_sum, r_a, r_b));
+    // r_addr = c_base + tid, then store C[tid] = r_sum
+    kb.emit(mov_imm(r_base, c_base));
+    kb.emit(add(r_addr, r_tid, r_base));
+    kb.emit(store_global(r_addr, r_sum));
+    kb.emit(exit_kernel());
+    return kb.build();
 }
 
 Kernel make_branch_demo_kernel(std::int32_t out_base) {
-    Kernel kernel;
-    kernel.name = "branch_demo";
-    kernel.instructions = {
-        // r0 = global thread index, r2 = output address
-        Instruction{OpCode::MovThreadIdx, 0, 0, 0, 0, 0, 0},
-        Instruction{OpCode::MovImm, 1, 0, 0, out_base, 0, 0},
-        Instruction{OpCode::Add, 2, 0, 1, 0, 0, 0},
-        // r3 = tid & 1, even threads branch to the taken path
-        Instruction{OpCode::AndImm, 3, 0, 0, 1, 0, 0},
-        Instruction{OpCode::BranchIfZero, 0, 3, 0, 0, 8, 11},
-        // odd path: write 300
-        Instruction{OpCode::MovImm, 4, 0, 0, 300, 0, 0},
-        Instruction{OpCode::StoreGlobal, 0, 2, 4, 0, 0, 0},
-        Instruction{OpCode::Exit, 0, 0, 0, 0, 0, 0},
-        // even path: write 200
-        Instruction{OpCode::MovImm, 4, 0, 0, 200, 0, 0},
-        Instruction{OpCode::StoreGlobal, 0, 2, 4, 0, 0, 0},
-        Instruction{OpCode::Exit, 0, 0, 0, 0, 0, 0},
-    };
-    return kernel;
+    constexpr Register r_tid = 0;
+    constexpr Register r_base = 1;
+    constexpr Register r_addr = 2;
+    constexpr Register r_pred = 3;
+    constexpr Register r_value = 4;
+
+    KernelBuilder kb("branch_demo");
+    const Label even_path{"even_path"};
+    const Label done{"done"};
+
+    // r_tid = global thread index, r_addr = out_base + tid
+    kb.emit(mov_thread_idx(r_tid));
+    kb.emit(mov_imm(r_base, out_base));
+    kb.emit(add(r_addr, r_tid, r_base));
+    // r_pred = tid & 1, even threads branch to the taken path
+    kb.emit(and_imm(r_pred, r_tid, 1));
+    kb.emit_branch_if_zero(r_pred, even_path, done);
+    // odd path: write 300
+    kb.emit(mov_imm(r_value, 300));
+    kb.emit(store_global(r_addr, r_value));
+    kb.emit(exit_kernel());
+    // even path: write 200
+    kb.bind(even_path);
+    kb.emit(mov_imm(r_value, 200));
+    kb.emit(store_global(r_addr, r_value));
+    kb.emit(exit_kernel());
+    kb.bind(done);
+    return kb.build();
 }
 
 Kernel make_shared_exchange_kernel(std::int32_t out_base) {
-    Kernel kernel;
-    kernel.name = "shared_exchange";
-    kernel.instructions = {
-        // r0 = global thread index, r1 = block-local thread index
-        Instruction{OpCode::MovThreadIdx, 0, 0, 0, 0, 0, 0},
-        Instruction{OpCode::MovBlockThreadIdx, 1, 0, 0, 0, 0, 0},
-        // shared[local_tid] = local_tid
-        Instruction{OpCode::StoreShared, 0, 1, 1, 0, 0, 0},
-        // wait until every warp in the block has filled shared memory
-        Instruction{OpCode::Barrier, 0, 0, 0, 0, 0, 0},
-        // r2 = local_tid ^ 32, so each thread reads a partner value from the other warp
-        Instruction{OpCode::XorImm, 2, 1, 0, 32, 0, 0},
-        Instruction{OpCode::LoadShared, 3, 2, 0, 0, 0, 0},
-        // store partner value to out_base + global_tid
-        Instruction{OpCode::MovImm, 4, 0, 0, out_base, 0, 0},
-        Instruction{OpCode::Add, 5, 0, 4, 0, 0, 0},
-        Instruction{OpCode::StoreGlobal, 0, 5, 3, 0, 0, 0},
-        Instruction{OpCode::Exit, 0, 0, 0, 0, 0, 0},
-    };
-    return kernel;
+    constexpr Register r_tid = 0;
+    constexpr Register r_local = 1;
+    constexpr Register r_partner = 2;
+    constexpr Register r_value = 3;
+    constexpr Register r_out_base = 4;
+    constexpr Register r_out_addr = 5;
+
+    KernelBuilder kb("shared_exchange");
+
+    // r_tid = global thread index, r_local = block-local thread index
+    kb.emit(mov_thread_idx(r_tid));
+    kb.emit(mov_block_thread_idx(r_local));
+    // shared[local_tid] = local_tid
+    kb.emit(store_shared(r_local, r_local));
+    // wait until every warp in the block has filled shared memory
+    kb.emit(barrier());
+    // r_partner = local_tid ^ 32, so each thread reads a partner value from the other warp
+    kb.emit(xor_imm(r_partner, r_local, 32));
+    kb.emit(load_shared(r_value, r_partner));
+    // store partner value to out_base + global_tid
+    kb.emit(mov_imm(r_out_base, out_base));
+    kb.emit(add(r_out_addr, r_tid, r_out_base));
+    kb.emit(store_global(r_out_addr, r_value));
+    kb.emit(exit_kernel());
+    return kb.build();
 }
 
 Kernel make_block_reduction_kernel(std::int32_t in_base, std::int32_t out_base) {
-    Kernel kernel;
-    kernel.name = "block_reduction";
-    auto& insts = kernel.instructions;
+    constexpr Register r_tid = 0;     // Global thread index, used for input addressing.
+    constexpr Register r_local = 1;   // Block-local thread index, used for shared-memory slots.
+    constexpr Register r_block = 2;   // Block index, used for the final block-sum writeback.
+    constexpr Register r_addr = 3;    // Reusable address register for global-memory accesses.
+    constexpr Register r_acc = 4;     // Current value loaded from global/shared memory.
+    constexpr Register r_pred = 5;    // Predicate register: 1 when this lane participates in a reduction step.
+    constexpr Register r_tmp = 6;     // Temporary value loaded from shared memory.
+    constexpr Register r_offset = 7;  // Temporary address/offset register such as local_tid + stride.
+
+    KernelBuilder kb("block_reduction");
 
     // Stage 1: each thread loads one input element and publishes it into
     // block-local shared memory. After the barrier, shared[local_tid]
     // contains the initial reduction state for this block.
-    insts.push_back(Instruction{OpCode::MovThreadIdx, 0, 0, 0, 0, 0, 0});
-    insts.push_back(Instruction{OpCode::MovBlockIdx, 2, 0, 0, 0, 0, 0});
-    insts.push_back(Instruction{OpCode::MovBlockThreadIdx, 1, 0, 0, 0, 0, 0});
-    insts.push_back(Instruction{OpCode::MovImm, 3, 0, 0, in_base, 0, 0});
-    insts.push_back(Instruction{OpCode::Add, 3, 0, 3, 0, 0, 0});
-    insts.push_back(Instruction{OpCode::LoadGlobal, 4, 3, 0, 0, 0, 0});
-    insts.push_back(Instruction{OpCode::StoreShared, 0, 1, 4, 0, 0, 0});
-    insts.push_back(Instruction{OpCode::Barrier, 0, 0, 0, 0, 0, 0});
+    kb.emit(mov_thread_idx(r_tid));
+    kb.emit(mov_block_idx(r_block));
+    kb.emit(mov_block_thread_idx(r_local));
+    kb.emit(mov_imm(r_addr, in_base));
+    kb.emit(add(r_addr, r_tid, r_addr));
+    kb.emit(load_global(r_acc, r_addr));
+    kb.emit(store_shared(r_local, r_acc));
+    kb.emit(barrier());
 
     const int strides[] = {32, 16, 8, 4, 2, 1};
     for (int stride : strides) {
@@ -108,42 +137,50 @@ Kernel make_block_reduction_kernel(std::int32_t in_base, std::int32_t out_base) 
         // Only threads with local_tid < stride participate in this round.
         // They accumulate shared[tid + stride] into shared[tid], then the
         // block synchronizes before the next stride begins.
-        insts.push_back(Instruction{OpCode::SetLtImm, 5, 1, 0, stride, 0, 0});
-        const std::size_t branch_index = insts.size();
-        insts.push_back(Instruction{OpCode::BranchIfZero, 0, 5, 0, 0, 0, 0});
-        insts.push_back(Instruction{OpCode::LoadShared, 6, 1, 0, 0, 0, 0});
-        insts.push_back(Instruction{OpCode::MovImm, 7, 0, 0, stride, 0, 0});
-        insts.push_back(Instruction{OpCode::Add, 7, 1, 7, 0, 0, 0});
-        insts.push_back(Instruction{OpCode::LoadShared, 7, 7, 0, 0, 0, 0});
-        insts.push_back(Instruction{OpCode::Add, 6, 6, 7, 0, 0, 0});
-        insts.push_back(Instruction{OpCode::StoreShared, 0, 1, 6, 0, 0, 0});
-        const std::uint32_t merge_pc = static_cast<std::uint32_t>(insts.size());
-        insts[branch_index].target = merge_pc;
-        insts[branch_index].join_target = merge_pc;
-        insts.push_back(Instruction{OpCode::Barrier, 0, 0, 0, 0, 0, 0});
+        const Label skip_round{"skip_stride_" + std::to_string(stride)};
+        const Label round_merge{"round_merge_" + std::to_string(stride)};
+        kb.emit(set_lt_imm(r_pred, r_local, stride));
+        kb.emit_branch_if_zero(r_pred, skip_round, round_merge);
+        kb.emit(load_shared(r_tmp, r_local));
+        kb.emit(mov_imm(r_offset, stride));
+        kb.emit(add(r_offset, r_local, r_offset));
+        kb.emit(load_shared(r_offset, r_offset));
+        kb.emit(add(r_tmp, r_tmp, r_offset));
+        kb.emit(store_shared(r_local, r_tmp));
+        kb.bind(skip_round);
+        kb.bind(round_merge);
+        kb.emit(barrier());
     }
 
     // Stage 3: one thread per block writes the final block sum back to
     // global memory at out_base + blockIdx.
-    const std::size_t branch_index = insts.size();
-    insts.push_back(Instruction{OpCode::BranchIfZero, 0, 1, 0, 0, 0, 0});
-    insts.push_back(Instruction{OpCode::Exit, 0, 0, 0, 0, 0, 0});
-    const std::uint32_t write_pc = static_cast<std::uint32_t>(insts.size());
-    insts.push_back(Instruction{OpCode::LoadShared, 6, 1, 0, 0, 0, 0});
-    insts.push_back(Instruction{OpCode::MovImm, 7, 0, 0, out_base, 0, 0});
-    insts.push_back(Instruction{OpCode::Add, 7, 2, 7, 0, 0, 0});
-    insts.push_back(Instruction{OpCode::StoreGlobal, 0, 7, 6, 0, 0, 0});
-    insts.push_back(Instruction{OpCode::Exit, 0, 0, 0, 0, 0, 0});
-    const std::uint32_t end_pc = static_cast<std::uint32_t>(insts.size());
-    insts[branch_index].target = write_pc;
-    insts[branch_index].join_target = end_pc;
-    return kernel;
+    const Label write_block_sum{"write_block_sum"};
+    const Label reduction_done{"reduction_done"};
+    kb.emit_branch_if_zero(r_local, write_block_sum, reduction_done);
+    kb.emit(exit_kernel());
+    kb.bind(write_block_sum);
+    kb.emit(load_shared(r_tmp, r_local));
+    kb.emit(mov_imm(r_offset, out_base));
+    kb.emit(add(r_offset, r_block, r_offset));
+    kb.emit(store_global(r_offset, r_tmp));
+    kb.emit(exit_kernel());
+    kb.bind(reduction_done);
+    return kb.build();
 }
 
 Kernel make_tiled_matmul_kernel(std::int32_t a_base, std::int32_t b_base, std::int32_t c_base) {
-    Kernel kernel;
-    kernel.name = "tiled_matmul";
-    auto& insts = kernel.instructions;
+    constexpr Register r_tid = 0;
+    constexpr Register r_local = 1;
+    constexpr Register r_tmp = 2;
+    constexpr Register r_addr = 3;
+    constexpr Register r_acc = 4;
+    constexpr Register r_row_base = 5;
+    constexpr Register r_col = 6;
+    constexpr Register r_a = 7;
+    constexpr Register r_b = 8;
+    constexpr Register r_mul = 9;
+
+    KernelBuilder kb("tiled_matmul");
 
     // v0 matmul uses one 8x8 block to compute one 8x8 output tile.
     // Each thread owns one output element C[row][col], where:
@@ -156,47 +193,47 @@ Kernel make_tiled_matmul_kernel(std::int32_t a_base, std::int32_t b_base, std::i
 
     // Stage 1: each thread loads one A element and one B element from
     // global memory into block-local shared memory.
-    insts.push_back(Instruction{OpCode::MovThreadIdx, 0, 0, 0, 0, 0, 0});
-    insts.push_back(Instruction{OpCode::MovBlockThreadIdx, 1, 0, 0, 0, 0, 0});
+    kb.emit(mov_thread_idx(r_tid));
+    kb.emit(mov_block_thread_idx(r_local));
 
-    insts.push_back(Instruction{OpCode::MovImm, 2, 0, 0, a_base, 0, 0});
-    insts.push_back(Instruction{OpCode::Add, 3, 1, 2, 0, 0, 0});
-    insts.push_back(Instruction{OpCode::LoadGlobal, 4, 3, 0, 0, 0, 0});
-    insts.push_back(Instruction{OpCode::StoreShared, 0, 1, 4, 0, 0, 0});
+    kb.emit(mov_imm(r_tmp, a_base));
+    kb.emit(add(r_addr, r_local, r_tmp));
+    kb.emit(load_global(r_acc, r_addr));
+    kb.emit(store_shared(r_local, r_acc));
 
-    insts.push_back(Instruction{OpCode::MovImm, 2, 0, 0, b_base, 0, 0});
-    insts.push_back(Instruction{OpCode::Add, 3, 1, 2, 0, 0, 0});
-    insts.push_back(Instruction{OpCode::LoadGlobal, 4, 3, 0, 0, 0, 0});
-    insts.push_back(Instruction{OpCode::MovImm, 2, 0, 0, 64, 0, 0});
-    insts.push_back(Instruction{OpCode::Add, 3, 1, 2, 0, 0, 0});
-    insts.push_back(Instruction{OpCode::StoreShared, 0, 3, 4, 0, 0, 0});
-    insts.push_back(Instruction{OpCode::Barrier, 0, 0, 0, 0, 0, 0});
+    kb.emit(mov_imm(r_tmp, b_base));
+    kb.emit(add(r_addr, r_local, r_tmp));
+    kb.emit(load_global(r_acc, r_addr));
+    kb.emit(mov_imm(r_tmp, 64));
+    kb.emit(add(r_addr, r_local, r_tmp));
+    kb.emit(store_shared(r_addr, r_acc));
+    kb.emit(barrier());
 
     // Stage 2: derive row_base and col from the block-local thread id.
-    insts.push_back(Instruction{OpCode::MovImm, 4, 0, 0, 0, 0, 0});    // accumulator
-    insts.push_back(Instruction{OpCode::AndImm, 5, 1, 0, 56, 0, 0});   // row * 8
-    insts.push_back(Instruction{OpCode::AndImm, 6, 1, 0, 7, 0, 0});    // col
+    kb.emit(mov_imm(r_acc, 0));          // accumulator
+    kb.emit(and_imm(r_row_base, r_local, 56));  // row * 8
+    kb.emit(and_imm(r_col, r_local, 7));        // col
 
     // Stage 3: unrolled dot product across the shared A/B tiles.
     for (int k = 0; k < 8; ++k) {
-        insts.push_back(Instruction{OpCode::MovImm, 2, 0, 0, k, 0, 0});
-        insts.push_back(Instruction{OpCode::Add, 3, 5, 2, 0, 0, 0});
-        insts.push_back(Instruction{OpCode::LoadShared, 7, 3, 0, 0, 0, 0});
+        kb.emit(mov_imm(r_tmp, k));
+        kb.emit(add(r_addr, r_row_base, r_tmp));
+        kb.emit(load_shared(r_a, r_addr));
 
-        insts.push_back(Instruction{OpCode::MovImm, 2, 0, 0, 64 + k * 8, 0, 0});
-        insts.push_back(Instruction{OpCode::Add, 3, 6, 2, 0, 0, 0});
-        insts.push_back(Instruction{OpCode::LoadShared, 8, 3, 0, 0, 0, 0});
+        kb.emit(mov_imm(r_tmp, 64 + k * 8));
+        kb.emit(add(r_addr, r_col, r_tmp));
+        kb.emit(load_shared(r_b, r_addr));
 
-        insts.push_back(Instruction{OpCode::Mul, 9, 7, 8, 0, 0, 0});
-        insts.push_back(Instruction{OpCode::Add, 4, 4, 9, 0, 0, 0});
+        kb.emit(mul(r_mul, r_a, r_b));
+        kb.emit(add(r_acc, r_acc, r_mul));
     }
 
     // Stage 4: write C[row][col] back to global memory.
-    insts.push_back(Instruction{OpCode::MovImm, 2, 0, 0, c_base, 0, 0});
-    insts.push_back(Instruction{OpCode::Add, 3, 1, 2, 0, 0, 0});
-    insts.push_back(Instruction{OpCode::StoreGlobal, 0, 3, 4, 0, 0, 0});
-    insts.push_back(Instruction{OpCode::Exit, 0, 0, 0, 0, 0, 0});
-    return kernel;
+    kb.emit(mov_imm(r_tmp, c_base));
+    kb.emit(add(r_addr, r_local, r_tmp));
+    kb.emit(store_global(r_addr, r_acc));
+    kb.emit(exit_kernel());
+    return kb.build();
 }
 
 }  // namespace tinygpu
