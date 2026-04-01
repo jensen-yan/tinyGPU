@@ -1,3 +1,4 @@
+#include "tinygpu/disasm.h"
 #include "tinygpu/kernels.h"
 #include "tinygpu/simulator.h"
 
@@ -202,6 +203,18 @@ TEST(SimulatorTest, TiledMatmulProducesExpected8x8Tile) {
     EXPECT_EQ(stats.shared_load_count, 16 * kMatrixSize);
     EXPECT_EQ(stats.shared_store_count, 2 * kMatrixSize);
     EXPECT_EQ(stats.barrier_issue_count, 2u);
+}
+
+TEST(SimulatorTest, DisassemblerRendersReadableBranchKernel) {
+    const tinygpu::Kernel kernel = tinygpu::make_branch_demo_kernel(192);
+    const std::string text = tinygpu::disassemble_kernel(kernel);
+
+    EXPECT_NE(text.find("kernel branch_demo"), std::string::npos);
+    EXPECT_NE(text.find("mov_thread_idx r0"), std::string::npos);
+    EXPECT_NE(text.find("branch_if_zero r3"), std::string::npos);
+    EXPECT_NE(text.find("target="), std::string::npos);
+    EXPECT_NE(text.find("join="), std::string::npos);
+    EXPECT_NE(text.find("store_global [r2], r4"), std::string::npos);
 }
 
 }  // namespace

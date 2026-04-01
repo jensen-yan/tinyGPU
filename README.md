@@ -81,6 +81,10 @@ ctest --test-dir build --output-on-failure
 - barrier 与分支发散统计
 - 示例结果是否通过
 
+如果想把教学 kernel 打印成更像小汇编的可读列表，可以使用：
+
+- `tinygpu::disassemble_kernel(kernel)`
+
 ## 项目边界
 
 当前版本明确不追求以下目标：

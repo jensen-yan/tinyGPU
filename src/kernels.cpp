@@ -169,16 +169,16 @@ Kernel make_block_reduction_kernel(std::int32_t in_base, std::int32_t out_base) 
 }
 
 Kernel make_tiled_matmul_kernel(std::int32_t a_base, std::int32_t b_base, std::int32_t c_base) {
-    constexpr Register r_tid = 0;
-    constexpr Register r_local = 1;
-    constexpr Register r_tmp = 2;
-    constexpr Register r_addr = 3;
-    constexpr Register r_acc = 4;
-    constexpr Register r_row_base = 5;
-    constexpr Register r_col = 6;
-    constexpr Register r_a = 7;
-    constexpr Register r_b = 8;
-    constexpr Register r_mul = 9;
+    constexpr Register r_tid = 0;       // Global thread index, useful for debug symmetry with other kernels.
+    constexpr Register r_local = 1;     // Block-local thread index in [0, 63], one thread per output element.
+    constexpr Register r_tmp = 2;       // General-purpose immediate scratch register.
+    constexpr Register r_addr = 3;      // Reusable global/shared address register.
+    constexpr Register r_acc = 4;       // Accumulator for C[row][col].
+    constexpr Register r_row_base = 5;  // row * 8, used to index one row of the A tile.
+    constexpr Register r_col = 6;       // col within the 8x8 tile.
+    constexpr Register r_a = 7;         // Current A[row][k] value loaded from shared memory.
+    constexpr Register r_b = 8;         // Current B[k][col] value loaded from shared memory.
+    constexpr Register r_mul = 9;       // Temporary product A[row][k] * B[k][col].
 
     KernelBuilder kb("tiled_matmul");
 

@@ -10,6 +10,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 enable_testing()
 
 add_library(tinygpu_core
+    src/disasm.cpp
     src/simulator.cpp
     src/kernels.cpp
 )
