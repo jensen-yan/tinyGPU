@@ -90,6 +90,9 @@ Kernel make_block_reduction_kernel(std::int32_t in_base, std::int32_t out_base) 
     kernel.name = "block_reduction";
     auto& insts = kernel.instructions;
 
+    // Stage 1: each thread loads one input element and publishes it into
+    // block-local shared memory. After the barrier, shared[local_tid]
+    // contains the initial reduction state for this block.
     insts.push_back(Instruction{OpCode::MovThreadIdx, 0, 0, 0, 0, 0, 0});
     insts.push_back(Instruction{OpCode::MovBlockIdx, 2, 0, 0, 0, 0, 0});
     insts.push_back(Instruction{OpCode::MovBlockThreadIdx, 1, 0, 0, 0, 0, 0});
@@ -101,6 +104,10 @@ Kernel make_block_reduction_kernel(std::int32_t in_base, std::int32_t out_base) 
 
     const int strides[] = {32, 16, 8, 4, 2, 1};
     for (int stride : strides) {
+        // Stage 2: tree reduction in shared memory.
+        // Only threads with local_tid < stride participate in this round.
+        // They accumulate shared[tid + stride] into shared[tid], then the
+        // block synchronizes before the next stride begins.
         insts.push_back(Instruction{OpCode::SetLtImm, 5, 1, 0, stride, 0, 0});
         const std::size_t branch_index = insts.size();
         insts.push_back(Instruction{OpCode::BranchIfZero, 0, 5, 0, 0, 0, 0});
@@ -116,6 +123,8 @@ Kernel make_block_reduction_kernel(std::int32_t in_base, std::int32_t out_base) 
         insts.push_back(Instruction{OpCode::Barrier, 0, 0, 0, 0, 0, 0});
     }
 
+    // Stage 3: one thread per block writes the final block sum back to
+    // global memory at out_base + blockIdx.
     const std::size_t branch_index = insts.size();
     insts.push_back(Instruction{OpCode::BranchIfZero, 0, 1, 0, 0, 0, 0});
     insts.push_back(Instruction{OpCode::Exit, 0, 0, 0, 0, 0, 0});

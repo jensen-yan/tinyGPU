@@ -41,7 +41,9 @@ struct Instruction {
     std::uint32_t src0 = 0;
     std::uint32_t src1 = 0;
     std::int32_t imm = 0;
+    // Branch target when the predicate is true.
     std::uint32_t target = 0;
+    // Reconvergence PC used when a divergent branch should merge again later.
     std::uint32_t join_target = 0;
 };
 
@@ -80,15 +82,19 @@ private:
 
     struct WarpState {
         struct ReconvergenceFrame {
+            // PC where the split paths should merge back together.
             std::size_t merge_pc = 0;
+            // PC for the not-taken path, which runs after the taken path completes.
             std::size_t pending_pc = 0;
             bool pending_started = false;
             std::vector<bool> pending_mask;
+            // Union of both path masks, restored after reconvergence.
             std::vector<bool> union_mask;
         };
 
         std::size_t warp_index = 0;
         std::size_t block_index = 0;
+        // In this simplified SIMT model, the whole warp advances with one PC.
         std::size_t pc = 0;
         bool done = false;
         bool waiting_on_barrier = false;

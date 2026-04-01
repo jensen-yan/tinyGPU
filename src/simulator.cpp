@@ -22,12 +22,15 @@ bool Simulator::all_threads_done(const WarpState& warp) const {
 void Simulator::advance_reconvergence(WarpState& warp) {
     while (!warp.reconvergence_stack.empty()) {
         WarpState::ReconvergenceFrame& frame = warp.reconvergence_stack.back();
+        // A path is considered complete either when all active lanes finished,
+        // or when the warp reached the branch's designated merge point.
         const bool path_complete = !has_live_threads(warp, warp.active_mask) || warp.pc == frame.merge_pc;
         if (!path_complete) {
             return;
         }
 
         if (!frame.pending_started) {
+            // Run the other side of the split before restoring the merged mask.
             frame.pending_started = true;
             warp.pc = frame.pending_pc;
             warp.active_mask = frame.pending_mask;
@@ -37,6 +40,7 @@ void Simulator::advance_reconvergence(WarpState& warp) {
             continue;
         }
 
+        // Both sides have finished. Continue with the merged active mask.
         warp.pc = frame.merge_pc;
         warp.active_mask = frame.union_mask;
         warp.reconvergence_stack.pop_back();
@@ -111,6 +115,8 @@ bool Simulator::step_warp(const Kernel& kernel, BlockState& block, WarpState& wa
         return false;
     }
 
+    // Before issuing another instruction, see whether a previously divergent
+    // branch should switch to its pending path or merge back together.
     advance_reconvergence(warp);
     if (!has_live_threads(warp, warp.active_mask)) {
         warp.done = all_threads_done(warp);
@@ -159,6 +165,7 @@ bool Simulator::step_warp(const Kernel& kernel, BlockState& block, WarpState& wa
             if (!warp.active_mask[lane] || warp.threads[lane].done) {
                 continue;
             }
+            // Block-local thread id = warp slot within the block + lane index.
             const std::size_t local_index = warp.warp_index * config_.warp_size + lane;
             warp.threads[lane].registers.at(inst.dst) = static_cast<std::int32_t>(local_index);
         }
@@ -267,6 +274,8 @@ bool Simulator::step_warp(const Kernel& kernel, BlockState& block, WarpState& wa
         const bool any_fallthrough = has_live_threads(warp, fallthrough_mask);
 
         if (any_taken && any_fallthrough) {
+            // Divergence: execute the taken path first, remember the fallthrough
+            // path, then merge both masks at join_target.
             std::vector<bool> union_mask = taken_mask;
             for (std::size_t lane = 0; lane < union_mask.size(); ++lane) {
                 union_mask[lane] = union_mask[lane] || fallthrough_mask[lane];
@@ -277,9 +286,11 @@ bool Simulator::step_warp(const Kernel& kernel, BlockState& block, WarpState& wa
             warp.pc = inst.target;
             ++current_stats_.divergent_branch_count;
         } else if (any_taken) {
+            // Uniform taken branch: no reconvergence bookkeeping needed.
             warp.active_mask = std::move(taken_mask);
             warp.pc = inst.target;
         } else {
+            // Uniform fallthrough branch.
             warp.active_mask = std::move(fallthrough_mask);
             ++warp.pc;
         }
@@ -290,6 +301,8 @@ bool Simulator::step_warp(const Kernel& kernel, BlockState& block, WarpState& wa
         warp.barrier_generation = block.barrier_generation;
         ++current_stats_.barrier_issue_count;
 
+        // A block-level barrier releases only when every unfinished warp in the
+        // block has arrived at the same barrier generation.
         bool release = true;
         for (WarpState& block_warp : block.warps) {
             if (block_warp.done) {
@@ -305,6 +318,7 @@ bool Simulator::step_warp(const Kernel& kernel, BlockState& block, WarpState& wa
             for (WarpState& block_warp : block.warps) {
                 if (!block_warp.done && block_warp.waiting_on_barrier &&
                     block_warp.barrier_generation == block.barrier_generation) {
+                    // Barrier is complete, so each waiting warp advances past it.
                     block_warp.waiting_on_barrier = false;
                     ++block_warp.pc;
                 }
@@ -371,6 +385,7 @@ Stats Simulator::run(const Kernel& kernel) {
             if (warp.done || warp.waiting_on_barrier) {
                 continue;
             }
+            // Round-robin scheduling keeps the execution order simple and visible.
             if (step_warp(kernel, *entry.block, warp)) {
                 ++current_stats_.warp_issue_count;
                 next_warp = (next_warp + attempt + 1) % resident_warps.size();
