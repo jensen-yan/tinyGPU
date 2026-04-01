@@ -12,7 +12,7 @@ struct Config {
     std::size_t threads_per_block = 64;
     std::size_t block_count = 2;
     std::size_t register_count = 8;
-    std::size_t shared_memory_bytes = 1024;
+    std::size_t shared_memory_words = 256;
     std::size_t global_memory_words = 1024;
     std::size_t max_cycles = 256;
 };
@@ -20,11 +20,16 @@ struct Config {
 enum class OpCode {
     MovImm,
     MovThreadIdx,
+    MovBlockThreadIdx,
     Add,
     AndImm,
+    XorImm,
     LoadGlobal,
     StoreGlobal,
+    LoadShared,
+    StoreShared,
     BranchIfZero,
+    Barrier,
     Exit,
 };
 
@@ -47,6 +52,9 @@ struct Stats {
     std::size_t warp_issue_count = 0;
     std::size_t global_load_count = 0;
     std::size_t global_store_count = 0;
+    std::size_t shared_load_count = 0;
+    std::size_t shared_store_count = 0;
+    std::size_t barrier_issue_count = 0;
     std::size_t divergent_branch_count = 0;
     std::size_t completed_warps = 0;
 };
@@ -77,6 +85,8 @@ private:
         std::size_t block_index = 0;
         std::size_t pc = 0;
         bool done = false;
+        bool waiting_on_barrier = false;
+        std::size_t barrier_generation = 0;
         std::vector<bool> active_mask;
         std::vector<ThreadState> threads;
         std::vector<ExecContext> pending_paths;
@@ -84,7 +94,8 @@ private:
 
     struct BlockState {
         std::size_t block_index = 0;
-        std::vector<std::uint8_t> shared_memory;
+        std::size_t barrier_generation = 0;
+        std::vector<std::int32_t> shared_memory;
         std::vector<WarpState> warps;
     };
 
@@ -96,11 +107,7 @@ private:
     bool has_live_threads(const WarpState& warp, const std::vector<bool>& mask) const;
     bool all_threads_done(const WarpState& warp) const;
     void restore_next_path(WarpState& warp);
-    bool step_warp(const Kernel& kernel, WarpState& warp);
+    bool step_warp(const Kernel& kernel, BlockState& block, WarpState& warp);
 };
-
-Kernel make_bootstrap_kernel();
-Kernel make_vector_add_kernel(std::int32_t a_base, std::int32_t b_base, std::int32_t c_base);
-Kernel make_branch_demo_kernel(std::int32_t out_base);
 
 }  // namespace tinygpu

@@ -49,6 +49,9 @@ Simulator::Simulator(Config config)
     if (config_.global_memory_words == 0) {
         throw std::invalid_argument("global_memory_words must be greater than zero");
     }
+    if (config_.shared_memory_words == 0) {
+        throw std::invalid_argument("shared_memory_words must be greater than zero");
+    }
 }
 
 std::vector<Simulator::BlockState> Simulator::build_blocks(const Kernel& kernel) const {
@@ -61,7 +64,7 @@ std::vector<Simulator::BlockState> Simulator::build_blocks(const Kernel& kernel)
     for (std::size_t block_index = 0; block_index < config_.block_count; ++block_index) {
         BlockState block;
         block.block_index = block_index;
-        block.shared_memory.assign(config_.shared_memory_bytes, 0);
+        block.shared_memory.assign(config_.shared_memory_words, 0);
         block.warps.reserve(warps_per_block);
 
         for (std::size_t warp_index = 0; warp_index < warps_per_block; ++warp_index) {
@@ -88,8 +91,11 @@ std::vector<Simulator::BlockState> Simulator::build_blocks(const Kernel& kernel)
     return blocks;
 }
 
-bool Simulator::step_warp(const Kernel& kernel, WarpState& warp) {
+bool Simulator::step_warp(const Kernel& kernel, BlockState& block, WarpState& warp) {
     if (warp.done) {
+        return false;
+    }
+    if (warp.waiting_on_barrier) {
         return false;
     }
 
@@ -129,6 +135,16 @@ bool Simulator::step_warp(const Kernel& kernel, WarpState& warp) {
         }
         ++warp.pc;
         break;
+    case OpCode::MovBlockThreadIdx:
+        for (std::size_t lane = 0; lane < warp.threads.size(); ++lane) {
+            if (!warp.active_mask[lane] || warp.threads[lane].done) {
+                continue;
+            }
+            const std::size_t local_index = warp.warp_index * config_.warp_size + lane;
+            warp.threads[lane].registers.at(inst.dst) = static_cast<std::int32_t>(local_index);
+        }
+        ++warp.pc;
+        break;
     case OpCode::Add:
         for (std::size_t lane = 0; lane < warp.threads.size(); ++lane) {
             if (!warp.active_mask[lane] || warp.threads[lane].done) {
@@ -146,6 +162,16 @@ bool Simulator::step_warp(const Kernel& kernel, WarpState& warp) {
             }
             warp.threads[lane].registers.at(inst.dst) =
                 warp.threads[lane].registers.at(inst.src0) & inst.imm;
+        }
+        ++warp.pc;
+        break;
+    case OpCode::XorImm:
+        for (std::size_t lane = 0; lane < warp.threads.size(); ++lane) {
+            if (!warp.active_mask[lane] || warp.threads[lane].done) {
+                continue;
+            }
+            warp.threads[lane].registers.at(inst.dst) =
+                warp.threads[lane].registers.at(inst.src0) ^ inst.imm;
         }
         ++warp.pc;
         break;
@@ -168,6 +194,28 @@ bool Simulator::step_warp(const Kernel& kernel, WarpState& warp) {
             const std::size_t address = static_cast<std::size_t>(warp.threads[lane].registers.at(inst.src0));
             global_memory_.at(address) = warp.threads[lane].registers.at(inst.src1);
             ++current_stats_.global_store_count;
+        }
+        ++warp.pc;
+        break;
+    case OpCode::LoadShared:
+        for (std::size_t lane = 0; lane < warp.threads.size(); ++lane) {
+            if (!warp.active_mask[lane] || warp.threads[lane].done) {
+                continue;
+            }
+            const std::size_t address = static_cast<std::size_t>(warp.threads[lane].registers.at(inst.src0));
+            warp.threads[lane].registers.at(inst.dst) = block.shared_memory.at(address);
+            ++current_stats_.shared_load_count;
+        }
+        ++warp.pc;
+        break;
+    case OpCode::StoreShared:
+        for (std::size_t lane = 0; lane < warp.threads.size(); ++lane) {
+            if (!warp.active_mask[lane] || warp.threads[lane].done) {
+                continue;
+            }
+            const std::size_t address = static_cast<std::size_t>(warp.threads[lane].registers.at(inst.src0));
+            block.shared_memory.at(address) = warp.threads[lane].registers.at(inst.src1);
+            ++current_stats_.shared_store_count;
         }
         ++warp.pc;
         break;
@@ -203,6 +251,34 @@ bool Simulator::step_warp(const Kernel& kernel, WarpState& warp) {
         }
         break;
     }
+    case OpCode::Barrier: {
+        warp.waiting_on_barrier = true;
+        warp.barrier_generation = block.barrier_generation;
+        ++current_stats_.barrier_issue_count;
+
+        bool release = true;
+        for (WarpState& block_warp : block.warps) {
+            if (block_warp.done) {
+                continue;
+            }
+            if (!block_warp.waiting_on_barrier || block_warp.barrier_generation != block.barrier_generation) {
+                release = false;
+                break;
+            }
+        }
+
+        if (release) {
+            for (WarpState& block_warp : block.warps) {
+                if (!block_warp.done && block_warp.waiting_on_barrier &&
+                    block_warp.barrier_generation == block.barrier_generation) {
+                    block_warp.waiting_on_barrier = false;
+                    ++block_warp.pc;
+                }
+            }
+            ++block.barrier_generation;
+        }
+        break;
+    }
     case OpCode::Exit:
         for (std::size_t lane = 0; lane < warp.threads.size(); ++lane) {
             if (!warp.active_mask[lane] || warp.threads[lane].done) {
@@ -226,10 +302,15 @@ Stats Simulator::run(const Kernel& kernel) {
     auto blocks = build_blocks(kernel);
     current_stats_ = Stats{};
 
-    std::vector<WarpState*> resident_warps;
+    struct ResidentWarp {
+        BlockState* block = nullptr;
+        WarpState* warp = nullptr;
+    };
+
+    std::vector<ResidentWarp> resident_warps;
     for (auto& block : blocks) {
         for (auto& warp : block.warps) {
-            resident_warps.push_back(&warp);
+            resident_warps.push_back(ResidentWarp{&block, &warp});
         }
     }
 
@@ -242,8 +323,8 @@ Stats Simulator::run(const Kernel& kernel) {
         bool any_progress = false;
         bool all_done = true;
 
-        for (WarpState* warp : resident_warps) {
-            if (!warp->done) {
+        for (const ResidentWarp& entry : resident_warps) {
+            if (!entry.warp->done) {
                 all_done = false;
                 break;
             }
@@ -254,11 +335,12 @@ Stats Simulator::run(const Kernel& kernel) {
         }
 
         for (std::size_t attempt = 0; attempt < resident_warps.size(); ++attempt) {
-            WarpState& warp = *resident_warps[(next_warp + attempt) % resident_warps.size()];
-            if (warp.done) {
+            ResidentWarp& entry = resident_warps[(next_warp + attempt) % resident_warps.size()];
+            WarpState& warp = *entry.warp;
+            if (warp.done || warp.waiting_on_barrier) {
                 continue;
             }
-            if (step_warp(kernel, warp)) {
+            if (step_warp(kernel, *entry.block, warp)) {
                 ++current_stats_.warp_issue_count;
                 next_warp = (next_warp + attempt + 1) % resident_warps.size();
                 any_progress = true;
@@ -272,8 +354,8 @@ Stats Simulator::run(const Kernel& kernel) {
         }
     }
 
-    for (const WarpState* warp : resident_warps) {
-        if (warp->done) {
+    for (const ResidentWarp& entry : resident_warps) {
+        if (entry.warp->done) {
             ++current_stats_.completed_warps;
         }
     }
@@ -291,57 +373,6 @@ std::int32_t Simulator::read_global(std::size_t index) const {
 
 std::size_t Simulator::global_memory_size() const {
     return global_memory_.size();
-}
-
-Kernel make_bootstrap_kernel() {
-    Kernel kernel;
-    kernel.name = "bootstrap";
-    kernel.instructions = {
-        Instruction{OpCode::MovImm, 0, 0, 0, 1},
-        Instruction{OpCode::MovImm, 1, 0, 0, 2},
-        Instruction{OpCode::Add, 2, 0, 1, 0},
-        Instruction{OpCode::Exit, 0, 0, 0, 0},
-    };
-    return kernel;
-}
-
-Kernel make_vector_add_kernel(std::int32_t a_base, std::int32_t b_base, std::int32_t c_base) {
-    Kernel kernel;
-    kernel.name = "vector_add";
-    kernel.instructions = {
-        Instruction{OpCode::MovThreadIdx, 0, 0, 0, 0},
-        Instruction{OpCode::MovImm, 1, 0, 0, a_base},
-        Instruction{OpCode::Add, 2, 0, 1, 0},
-        Instruction{OpCode::LoadGlobal, 3, 2, 0, 0},
-        Instruction{OpCode::MovImm, 4, 0, 0, b_base},
-        Instruction{OpCode::Add, 5, 0, 4, 0},
-        Instruction{OpCode::LoadGlobal, 6, 5, 0, 0},
-        Instruction{OpCode::Add, 7, 3, 6, 0},
-        Instruction{OpCode::MovImm, 1, 0, 0, c_base},
-        Instruction{OpCode::Add, 2, 0, 1, 0},
-        Instruction{OpCode::StoreGlobal, 2, 2, 7, 0},
-        Instruction{OpCode::Exit, 0, 0, 0, 0},
-    };
-    return kernel;
-}
-
-Kernel make_branch_demo_kernel(std::int32_t out_base) {
-    Kernel kernel;
-    kernel.name = "branch_demo";
-    kernel.instructions = {
-        Instruction{OpCode::MovThreadIdx, 0, 0, 0, 0, 0},
-        Instruction{OpCode::MovImm, 1, 0, 0, out_base, 0},
-        Instruction{OpCode::Add, 2, 0, 1, 0, 0},
-        Instruction{OpCode::AndImm, 3, 0, 0, 1, 0},
-        Instruction{OpCode::BranchIfZero, 0, 3, 0, 0, 8},
-        Instruction{OpCode::MovImm, 4, 0, 0, 300, 0},
-        Instruction{OpCode::StoreGlobal, 0, 2, 4, 0, 0},
-        Instruction{OpCode::Exit, 0, 0, 0, 0, 0},
-        Instruction{OpCode::MovImm, 4, 0, 0, 200, 0},
-        Instruction{OpCode::StoreGlobal, 0, 2, 4, 0, 0},
-        Instruction{OpCode::Exit, 0, 0, 0, 0, 0},
-    };
-    return kernel;
 }
 
 }  // namespace tinygpu

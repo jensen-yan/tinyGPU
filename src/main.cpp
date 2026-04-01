@@ -1,3 +1,4 @@
+#include "tinygpu/kernels.h"
 #include "tinygpu/simulator.h"
 
 #include <exception>
@@ -44,6 +45,9 @@ bool run_vector_add_demo(tinygpu::Simulator& simulator, const tinygpu::Config& c
     std::cout << "warp_issues: " << stats.warp_issue_count << "\n";
     std::cout << "global_loads: " << stats.global_load_count << "\n";
     std::cout << "global_stores: " << stats.global_store_count << "\n";
+    std::cout << "shared_loads: " << stats.shared_load_count << "\n";
+    std::cout << "shared_stores: " << stats.shared_store_count << "\n";
+    std::cout << "barriers: " << stats.barrier_issue_count << "\n";
     std::cout << "divergent_branches: " << stats.divergent_branch_count << "\n";
     std::cout << "completed_warps: " << stats.completed_warps << "\n";
     std::cout << "sample C[0]: " << simulator.read_global(c_base) << "\n";
@@ -84,10 +88,57 @@ bool run_branch_demo(tinygpu::Simulator& simulator, const tinygpu::Config& confi
     std::cout << "warp_issues: " << stats.warp_issue_count << "\n";
     std::cout << "global_loads: " << stats.global_load_count << "\n";
     std::cout << "global_stores: " << stats.global_store_count << "\n";
+    std::cout << "shared_loads: " << stats.shared_load_count << "\n";
+    std::cout << "shared_stores: " << stats.shared_store_count << "\n";
+    std::cout << "barriers: " << stats.barrier_issue_count << "\n";
     std::cout << "divergent_branches: " << stats.divergent_branch_count << "\n";
     std::cout << "completed_warps: " << stats.completed_warps << "\n";
     std::cout << "sample out[0]: " << simulator.read_global(out_base) << "\n";
     std::cout << "sample out[1]: " << simulator.read_global(out_base + 1) << "\n";
+    std::cout << "status: " << (ok ? "PASS" : "FAIL") << "\n";
+    return ok;
+}
+
+bool run_shared_exchange_demo(tinygpu::Simulator& simulator, const tinygpu::Config& config) {
+    const std::size_t element_count = config.block_count * config.threads_per_block;
+    const std::size_t out_base = 4 * element_count;
+
+    if (out_base + element_count > simulator.global_memory_size()) {
+        std::cerr << "fatal: global memory is too small for shared exchange demo\n";
+        return false;
+    }
+
+    for (std::size_t i = 0; i < element_count; ++i) {
+        simulator.write_global(out_base + i, -1);
+    }
+
+    const tinygpu::Kernel kernel = tinygpu::make_shared_exchange_kernel(static_cast<std::int32_t>(out_base));
+    const tinygpu::Stats stats = simulator.run(kernel);
+
+    bool ok = true;
+    for (std::size_t i = 0; i < element_count; ++i) {
+        const std::size_t local = i % config.threads_per_block;
+        const std::int32_t expected = static_cast<std::int32_t>(local ^ 32U);
+        if (simulator.read_global(out_base + i) != expected) {
+            ok = false;
+            break;
+        }
+    }
+
+    std::cout << "tinyGPU shared exchange demo\n";
+    std::cout << "kernel: " << kernel.name << "\n";
+    std::cout << "threads: " << element_count << "\n";
+    std::cout << "cycles: " << stats.cycles << "\n";
+    std::cout << "warp_issues: " << stats.warp_issue_count << "\n";
+    std::cout << "global_loads: " << stats.global_load_count << "\n";
+    std::cout << "global_stores: " << stats.global_store_count << "\n";
+    std::cout << "shared_loads: " << stats.shared_load_count << "\n";
+    std::cout << "shared_stores: " << stats.shared_store_count << "\n";
+    std::cout << "barriers: " << stats.barrier_issue_count << "\n";
+    std::cout << "divergent_branches: " << stats.divergent_branch_count << "\n";
+    std::cout << "completed_warps: " << stats.completed_warps << "\n";
+    std::cout << "sample out[0]: " << simulator.read_global(out_base) << "\n";
+    std::cout << "sample out[32]: " << simulator.read_global(out_base + 32) << "\n";
     std::cout << "status: " << (ok ? "PASS" : "FAIL") << "\n";
     return ok;
 }
@@ -100,7 +151,9 @@ int main() {
         tinygpu::Simulator simulator(config);
         const bool vector_ok = run_vector_add_demo(simulator, config);
         const bool branch_ok = run_branch_demo(simulator, config);
-        return (vector_ok && branch_ok) ? 0 : 1;
+        std::cout << "\n";
+        const bool shared_ok = run_shared_exchange_demo(simulator, config);
+        return (vector_ok && branch_ok && shared_ok) ? 0 : 1;
     } catch (const std::exception& ex) {
         std::cerr << "fatal: " << ex.what() << "\n";
         return 1;

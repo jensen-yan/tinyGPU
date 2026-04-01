@@ -43,6 +43,8 @@
 
 - `Kernel`
   描述 launch 维度、寄存器数量、shared memory 需求和指令流
+- `kernels`
+  存放教学用的参考 kernel 构造函数，例如 `vector add`、branch demo、shared-memory demo
 - `ThreadState`
   保存每个 thread 的架构态，例如寄存器、`pc` 和完成状态
 - `WarpState`
@@ -58,11 +60,15 @@
 
 - `mov_imm`
 - `mov_thread_idx`
+- `mov_block_thread_idx`
 - `add`
 - `and_imm`
+- `xor_imm`
 - `mul`
 - `load_global`
 - `store_global`
+- `load_shared`
+- `store_shared`
 - `branch_if_zero`
 - `barrier`
 - `exit`
@@ -86,7 +92,17 @@
 3. 跑通基于 global memory 的 `vector add`
 4. 加入 active mask 和基础分支发散
 5. 加入 shared memory 和 block barrier
-6. 跑通分块矩阵乘示例
+6. 用 shared memory 跑通跨 warp 数据交换示例
+7. 跑通分块矩阵乘示例
+
+## 测试策略
+
+- `ISA` 微测试
+  每次新增 opcode，都补一个最小可验证用例
+- `SIMT` 行为测试
+  覆盖 warp 发散、active mask 和 barrier
+- `kernel` 回归测试
+  用 `vector add`、branch demo、shared-memory demo 保证主路径不回退
 
 ## 早期迭代的非目标
 
